@@ -17,6 +17,8 @@ Run the binary from source with `cargo run -- <args>` or
 
 - `src/lib.rs` — startup, provider selection, context assembly, CLI dispatch.
 - `src/agent.rs` — the sequential model/tool loop.
+- `src/ui_bridge.rs` — `AgentUi` and `ToolUi` traits shared by the CLI and TUI.
+- `src/tui/` — ratatui interface, input editor, palette, modals, rendering.
 - `src/provider/` — OpenAI Chat Completions, Anthropic Messages, OpenAI Responses.
 - `src/tools/` — built-in tools and the tool registry.
 - `src/mcp/` — stdio and streamable-HTTP MCP clients.
@@ -46,3 +48,7 @@ Run the binary from source with `cargo run -- <args>` or
   changes.
 - Add or update an integration test for behavior that crosses the model, tool,
   or provider boundary.
+- TUI code must restore the terminal on every exit path and must not read from
+  stdin directly; approvals and questions go through `ToolUi`.
+- ChatGPT auth reads Codex CLI credentials at runtime. Never copy those tokens
+  into harness config or logs.

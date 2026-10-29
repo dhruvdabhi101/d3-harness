@@ -7,9 +7,11 @@ use crate::mcp::McpManager;
 use crate::provider::ToolDefinition;
 use crate::skills::SkillSet;
 use crate::ui;
+use crate::ui_bridge::ToolUi;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct ToolSpec {
@@ -64,7 +66,7 @@ pub struct ToolRegistry {
     mcp: McpManager,
     permissions: Permissions,
     auto_approve: bool,
-    interactive: bool,
+    ui: Arc<dyn ToolUi>,
     todos: Vec<TodoItem>,
 }
 
@@ -81,7 +83,7 @@ impl ToolRegistry {
         mcp: McpManager,
         permissions: Permissions,
         auto_approve: bool,
-        interactive: bool,
+        ui: Arc<dyn ToolUi>,
     ) -> Self {
         let mut specs = builtin_specs(&skills);
         for tool in mcp.tools() {
@@ -102,7 +104,7 @@ impl ToolRegistry {
             mcp,
             permissions,
             auto_approve,
-            interactive,
+            ui,
             todos: Vec::new(),
         }
     }
@@ -204,7 +206,7 @@ impl ToolRegistry {
             ToolKind::Bash => self.bash(&arguments).await,
             ToolKind::Glob => self.glob(&arguments),
             ToolKind::Grep => self.grep(&arguments),
-            ToolKind::AskUser => self.ask_user(&arguments),
+            ToolKind::AskUser => self.ask_user(&arguments).await,
             ToolKind::Todo => self.write_todos(&arguments),
             ToolKind::Skill => self.load_skill(&arguments),
             ToolKind::Mcp { server, tool } => self.call_mcp(server, tool, arguments).await,
@@ -232,8 +234,11 @@ impl ToolRegistry {
             Err(error) => return ToolOutcome::err(format!("{error:#}")),
         };
         let old = std::fs::read_to_string(&path).unwrap_or_default();
-        ui::print_diff(&self.display_path(&path), &old, content);
-        if let Err(error) = self.authorize(self.permissions.edit(), "write this file?") {
+        self.ui.diff(&self.display_path(&path), &old, content);
+        if let Err(error) = self
+            .authorize(self.permissions.edit(), "write this file?")
+            .await
+        {
             return ToolOutcome::err(format!("{error:#}"));
         }
         if let Some(parent) = path.parent()
@@ -311,8 +316,11 @@ impl ToolRegistry {
             original.replacen(old_string, new_string, 1)
         };
         let rel = self.display_path(&path);
-        ui::print_diff(&rel, &original, &updated);
-        if let Err(error) = self.authorize(self.permissions.edit(), "apply this edit?") {
+        self.ui.diff(&rel, &original, &updated);
+        if let Err(error) = self
+            .authorize(self.permissions.edit(), "apply this edit?")
+            .await
+        {
             return ToolOutcome::err(format!("{error:#}"));
         }
         match std::fs::write(&path, &updated) {
@@ -360,12 +368,15 @@ impl ToolRegistry {
             }
             Permission::Ask => {
                 if !self.auto_approve {
-                    if !self.interactive {
+                    if !self.ui.is_interactive() {
                         return ToolOutcome::err(
                             "Shell approval is required, but this run is not interactive. Re-run with --yes to allow shell commands.",
                         );
                     }
-                    let approved = ui::confirm(&format!("run `{}`?", truncate(command, 160)));
+                    let approved = self
+                        .ui
+                        .confirm(&format!("run `{}`?", truncate(command, 160)), command)
+                        .await;
                     if !approved {
                         return ToolOutcome::err("The user declined to run this command.");
                     }
@@ -397,7 +408,7 @@ impl ToolRegistry {
         }
     }
 
-    fn ask_user(&self, args: &Value) -> ToolOutcome {
+    async fn ask_user(&self, args: &Value) -> ToolOutcome {
         let question = match args.get("question").and_then(Value::as_str) {
             Some(question) if !question.trim().is_empty() => question,
             _ => return ToolOutcome::err("ask_user needs a non-empty `question` string"),
@@ -414,36 +425,20 @@ impl ToolRegistry {
             })
             .unwrap_or_default();
 
-        if !self.interactive {
+        if !self.ui.is_interactive() {
             return ToolOutcome::ok(
                 "The user is not available to answer in this run. State a reasonable assumption explicitly and continue, or stop and report exactly what you need.",
                 "user unavailable; agent will state an assumption",
             );
         }
 
-        eprintln!();
-        eprintln!("{} {}", ui::yellow("?"), ui::bold(question));
-        for (index, option) in options.iter().enumerate() {
-            eprintln!("  {}. {}", index + 1, option);
+        let answer = self.ui.ask(question, &options).await;
+        match answer {
+            Some(answer) => {
+                ToolOutcome::ok(format!("User answer: {answer}"), format!("user: {answer}"))
+            }
+            None => ToolOutcome::ok("The user did not answer.", ""),
         }
-        let answer = match ui::read_line("  answer: ") {
-            Ok(Some(answer)) => answer.trim().to_string(),
-            _ => String::new(),
-        };
-        if answer.is_empty() {
-            return ToolOutcome::ok("The user did not answer.", "");
-        }
-        if let Ok(index) = answer.parse::<usize>()
-            && index >= 1
-            && index <= options.len()
-        {
-            let chosen = &options[index - 1];
-            return ToolOutcome::ok(
-                format!("User answer: {chosen}"),
-                format!("user chose: {chosen}"),
-            );
-        }
-        ToolOutcome::ok(format!("User answer: {answer}"), format!("user: {answer}"))
     }
 
     fn write_todos(&mut self, args: &Value) -> ToolOutcome {
@@ -548,18 +543,18 @@ impl ToolRegistry {
         }
     }
 
-    fn authorize(&self, configured: Permission, question: &str) -> Result<()> {
+    async fn authorize(&self, configured: Permission, question: &str) -> Result<()> {
         match configured {
             Permission::Allow => Ok(()),
             Permission::Deny => bail!("edits are disabled by configuration"),
             Permission::Ask => {
                 if self.auto_approve {
                     Ok(())
-                } else if !self.interactive {
+                } else if !self.ui.is_interactive() {
                     bail!(
                         "edit approval is required, but this run is not interactive. Re-run with --yes to allow edits"
                     )
-                } else if ui::confirm(question) {
+                } else if self.ui.confirm(question, "").await {
                     Ok(())
                 } else {
                     bail!("the user declined the edit")

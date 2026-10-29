@@ -38,11 +38,18 @@ pub struct Completion {
     pub provider_items: Vec<Value>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ProviderAuth {
+    pub key: String,
+    pub account_id: Option<String>,
+}
+
 pub struct Provider {
     pub name: String,
     config: ProviderConfig,
     model: String,
     api_key: String,
+    account_id: Option<String>,
     client: reqwest::Client,
 }
 
@@ -51,7 +58,7 @@ impl Provider {
         name: String,
         config: ProviderConfig,
         model: String,
-        api_key: String,
+        auth: ProviderAuth,
     ) -> Result<Self> {
         if config.base_url.is_none() {
             bail!("provider '{name}' has no base_url");
@@ -64,7 +71,8 @@ impl Provider {
             name,
             config,
             model,
-            api_key,
+            api_key: auth.key,
+            account_id: auth.account_id,
             client,
         })
     }
@@ -78,6 +86,9 @@ impl Provider {
     }
 
     pub async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        if self.config.kind == Some(ProviderKind::ChatGpt) {
+            return codex_models();
+        }
         let url = self
             .config
             .models_url
@@ -119,7 +130,7 @@ impl Provider {
             ProviderKind::Anthropic => {
                 anthropic::complete(self, system, messages, tools, on_text).await
             }
-            ProviderKind::Responses => {
+            ProviderKind::Responses | ProviderKind::ChatGpt => {
                 responses::complete(self, system, messages, tools, on_text).await
             }
         }
@@ -156,7 +167,14 @@ impl Provider {
     }
 
     pub(super) fn bearer_request(&self, url: &str, body: &Value) -> reqwest::RequestBuilder {
-        let req = self.client.post(url).bearer_auth(&self.api_key).json(body);
+        let mut req = self.client.post(url).bearer_auth(&self.api_key).json(body);
+        if self.config.kind == Some(ProviderKind::ChatGpt)
+            && let Some(account_id) = &self.account_id
+        {
+            req = req
+                .header("chatgpt-account-id", account_id)
+                .header("originator", "codex_cli_rs");
+        }
         self.apply_headers(req)
     }
 
@@ -239,6 +257,22 @@ pub(super) fn truncate(text: &str, max: usize) -> String {
     format!("{cut}\n… truncated")
 }
 
+fn codex_models() -> Result<Vec<ModelInfo>> {
+    let home = dirs::home_dir().context("could not find the home directory")?;
+    let codex_home = std::env::var("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| home.join(".codex"));
+    let path = codex_home.join("models_cache.json");
+    let text = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "no Codex model cache at {}. Run `codex login` and try again.",
+            path.display()
+        )
+    })?;
+    let value: Value = serde_json::from_str(&text)?;
+    Ok(parse_models(&value))
+}
+
 pub(super) fn parse_models(value: &Value) -> Vec<ModelInfo> {
     let items = value
         .get("data")
@@ -253,6 +287,7 @@ pub(super) fn parse_models(value: &Value) -> Vec<ModelInfo> {
         .filter_map(|item| {
             let id = item
                 .get("id")
+                .or_else(|| item.get("slug"))
                 .or_else(|| item.get("name"))
                 .and_then(Value::as_str)?
                 .to_string();

@@ -2,9 +2,11 @@
 
 A small, honest coding-agent harness for the terminal, written in Rust.
 
-It connects to OpenCode's inference API (or OpenAI, Anthropic, and any
-OpenAI-compatible endpoint), runs a tool-calling agent loop, and loads the
-context a real project needs: `AGENTS.md`, skills, and MCP servers.
+It opens a full-screen TUI with a message box, a slash-command palette, model
+picking, approval dialogs, and live tool diffs. Behind it is a tool-calling
+agent loop that loads the context a real project needs: `AGENTS.md`, skills, and
+MCP servers. It talks to OpenCode, ChatGPT/Codex, OpenAI, Anthropic, and any
+OpenAI-compatible endpoint.
 
 The default system prompt is part of the product. It asks the agent to write
 code a careful human would review, to ask when ambiguity matters, to keep the
@@ -45,14 +47,74 @@ harness -m claude-sonnet-4-5 "review this diff"
 harness --list-models
 ```
 
-Run without a prompt for an interactive session:
+Run without a prompt for the full-screen interface:
 
 ```bash
 harness
 ```
 
+If no key is configured, the harness asks for it before opening the TUI, saves
+it with `0600` permissions, verifies it against the provider's model catalog,
+and starts. Reuse is automatic on the next run.
+
 Options must come before the prompt. `harness "prompt" --yes` treats `--yes` as
 part of the prompt.
+
+## TUI
+
+The interactive mode is a real terminal application, not a line reader.
+
+```text
+ ◆ harness 0.1.0  oc-rust-harness                       ready  chatgpt/gpt-5.6-sol
+                                                    ╭ session ──────────────────╮
+    › add a timeout to the fetch helper              │provider  chatgpt         │
+                                                     │model     gpt-5.6-sol     │
+  ◆ I’ll read the helper and the tests first.        │approval  ask             │
+    ● read  src/fetch.rs                             │                          │
+      src/fetch.rs (86 lines)                        │PLAN                      │
+    ┌ src/fetch.rs                                   │  [~] read helper        │
+    │ @@ -40,6 +40,8 @@                              │  [ ] add timeout        │
+    │ -    let response = client.get(url).await?;     │  [ ] run tests          │
+    │ +    let response = timeout(…).await??;         │                          │
+                                                     │CONTEXT                   │
+  ◆ Added a 10s timeout and updated the test.         │  messages  4             │
+                                                     │  tokens    8.2k / 412    │
+ ╭ message ──────────────────────────────────────────╯                          │
+ │ Ask anything, or type / for commands                                          │
+ ╰───────────────────────────────────────────────────────────────────────────────╯
+ Enter send · Shift+Enter newline · / commands · Ctrl+B sidebar          ready
+```
+
+Features:
+
+- Streamed assistant text with light markdown and code styling.
+- Tool calls as live rows with spinner, result summary, and color-coded diffs.
+- Slash-command palette that opens as soon as you type `/`.
+- Live model picker via `/models`, fetched from the provider catalog.
+- Approval modal for shell commands, with the exact command shown.
+- Question modal for `ask_user`, with options and free-form input.
+- Sidebar with session model, approval mode, plan/todos, message and token counts.
+- Scrollback with PageUp/PageDown, mouse wheel, and auto-follow that pauses when
+  you scroll up.
+- Multi-line editor with history, bracketed paste, and proper cursor movement.
+
+Keybindings:
+
+| Key | Action |
+| --- | --- |
+| `Enter` | send |
+| `Shift+Enter` / `Alt+Enter` | newline |
+| `/` | open the command palette |
+| `Tab` | complete/open the command palette |
+| `Up` / `Down` | history or move through the palette |
+| `PageUp` / `PageDown` | scroll the conversation |
+| `Ctrl+B` | show/hide the sidebar |
+| `Ctrl+U` / `Ctrl+W` | clear line / delete word |
+| `Ctrl+C` twice | quit while a turn is running |
+| `Ctrl+D` | quit when the input is empty |
+| `Esc` | close palette/modal, deny approval, or clear input |
+
+The plain line-based REPL is still available with `--no-tui`.
 
 ## What it does
 
@@ -75,6 +137,10 @@ part of the prompt.
   input, stores it with `0600` permissions, and reuses it next time.
 - **Model discovery**: fetches the provider's model catalog and supports
   `harness --list-models` and the interactive `/models` picker.
+- **Full-screen TUI**: streaming messages, tool diffs, plan sidebar, command
+  palette, model picker, and approval/question modals.
+- **ChatGPT authentication**: reuse the login saved by Codex CLI, including
+  model discovery from its local cache.
 - **Streaming**: SSE streaming for Chat Completions, Anthropic Messages, and
   OpenAI Responses. Non-streaming JSON responses also work.
 
@@ -85,6 +151,7 @@ Built-in presets:
 | Provider | API | Key | Default model |
 | --- | --- | --- | --- |
 | `opencode` | OpenAI Chat Completions | `OPENCODE_API_KEY` | `deepseek-v4.1-flash` |
+| `chatgpt` | ChatGPT/Codex backend | Codex CLI login | `gpt-5.6-sol` |
 | `openai` | OpenAI Responses | `OPENAI_API_KEY` | `gpt-5.3-codex` |
 | `codex` | OpenAI Responses | `OPENAI_API_KEY` | `gpt-5.3-codex` |
 | `anthropic` | Anthropic Messages | `ANTHROPIC_API_KEY` | `claude-sonnet-4-5` |
@@ -179,6 +246,29 @@ instead.
 
 Keys can also come from the provider's environment variable, an `api_key` in
 `harness.json`, a custom `api_key_env`, or `HARNESS_API_KEY`.
+
+### ChatGPT / OpenAI account authentication
+
+There are two OpenAI paths:
+
+- `-p openai` uses an OpenAI API key. It prompts for one on first use exactly like
+  OpenCode does.
+- `-p chatgpt` uses a ChatGPT plan login. The harness reads the credentials that
+  the Codex CLI already stores in `~/.codex/auth.json` (or `$CODEX_HOME`), calls
+  the ChatGPT Codex backend, and lists models from `models_cache.json`.
+
+```bash
+codex login            # once, using the official Codex CLI
+harness -p chatgpt     # harness reuses that login
+harness -p chatgpt --list-models
+```
+
+`harness --login -p chatgpt` verifies the existing Codex login instead of
+prompting. The token never gets copied into harness config; it is read from the
+Codex auth file at runtime. If you prefer key-based auth, use `-p openai`.
+
+The ChatGPT provider speaks the same Responses wire format as the OpenAI
+provider, including reasoning-item replay for tool calls.
 
 A complete example is in [`harness.example.json`](harness.example.json).
 
@@ -310,6 +400,7 @@ harness [OPTIONS] [PROMPT]...
       --list-models            fetch the provider's models and exit
       --login                  ask for an API key, save it, verify it, and exit
   -q, --quiet                  hide the startup banner
+      --no-tui                 use the plain line-based REPL
       --no-color               disable color
 ```
 
@@ -360,7 +451,9 @@ The test suite covers:
 - stdio MCP tool discovery and calls;
 - HTTP MCP initialization, session headers, SSE responses, and calls;
 - provider model-list fetching and sorted output;
-- API-key storage permissions and preservation of other provider keys.
+- API-key storage permissions and preservation of other provider keys;
+- TUI command-palette filtering, turn submission, streaming, and approval modals;
+- multi-line input editing and cursor movement at UTF-8 boundaries.
 
 To inspect exactly what the model will receive without spending tokens:
 
@@ -380,9 +473,10 @@ harness -q "Reply with exactly: harness is alive"
 ## Design notes
 
 The harness is deliberately small. It uses one provider abstraction, one
-sequential agent loop, and one tool registry. There is no hidden agent
-orchestration: every tool call and result is in the conversation, and every file
-change is shown as a diff.
+sequential agent loop, and one tool registry. The CLI and TUI share the same
+`AgentUi` and `ToolUi` traits, so tool execution never knows which interface is
+drawing it. There is no hidden agent orchestration: every tool call and result
+is in the conversation, and every file change is shown as a diff.
 
 Default prompt principles:
 

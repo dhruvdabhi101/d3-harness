@@ -52,6 +52,8 @@ pub enum ProviderKind {
     #[serde(alias = "codex", alias = "openai-responses")]
     Responses,
     Anthropic,
+    #[serde(alias = "chat-gpt", alias = "openai-chatgpt", alias = "codex-chatgpt")]
+    ChatGpt,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -67,6 +69,8 @@ pub struct ProviderConfig {
     pub models_url: Option<String>,
     pub api_key: Option<String>,
     pub api_key_env: Option<String>,
+    /// ChatGPT account id paired with a manually supplied access token.
+    pub account_id: Option<String>,
     pub model: Option<String>,
     pub max_tokens: Option<u32>,
     pub headers: BTreeMap<String, String>,
@@ -85,6 +89,7 @@ impl ProviderConfig {
             models_url: over.models_url.or(self.models_url),
             api_key: over.api_key.or(self.api_key),
             api_key_env: over.api_key_env.or(self.api_key_env),
+            account_id: over.account_id.or(self.account_id),
             model: over.model.or(self.model),
             max_tokens: over.max_tokens.or(self.max_tokens),
             headers: {
@@ -467,6 +472,58 @@ fn write_private_json(path: &Path, value: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
+pub struct ChatGptAuth {
+    pub access_token: String,
+    pub account_id: String,
+}
+
+pub fn codex_auth() -> Result<ChatGptAuth> {
+    if let (Ok(token), Ok(account)) = (
+        std::env::var("CODEX_ACCESS_TOKEN"),
+        std::env::var("CODEX_ACCOUNT_ID"),
+    ) && !token.is_empty()
+        && !account.is_empty()
+    {
+        return Ok(ChatGptAuth {
+            access_token: token,
+            account_id: account,
+        });
+    }
+
+    let home = dirs::home_dir().context("could not find the home directory")?;
+    let codex_home = std::env::var("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join(".codex"));
+    let path = codex_home.join("auth.json");
+    let text = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "Codex is not logged in ({} not found). Run `codex login`, or use `-p openai` with an API key.",
+            path.display()
+        )
+    })?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    let tokens = value
+        .get("tokens")
+        .context("Codex auth has no ChatGPT tokens. Run `codex login`, or use `-p openai`.")?;
+    let access_token = tokens
+        .get("access_token")
+        .and_then(serde_json::Value::as_str)
+        .filter(|token| !token.is_empty())
+        .context("Codex auth has no access token. Run `codex login` again.")?
+        .to_string();
+    let account_id = tokens
+        .get("account_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|account| !account.is_empty())
+        .context("Codex auth has no ChatGPT account id. Run `codex login` again.")?
+        .to_string();
+    Ok(ChatGptAuth {
+        access_token,
+        account_id,
+    })
+}
+
 fn key_from_opencode_auth(provider: &str) -> Option<String> {
     let mut candidates = Vec::new();
     if let Some(data) = dirs::data_dir() {
@@ -527,6 +584,13 @@ pub fn provider_presets() -> Vec<ProviderConfig> {
             opencode.models_url = Some("https://opencode.ai/inference/v1/models".to_string());
             opencode
         },
+        preset(
+            "chatgpt",
+            ProviderKind::ChatGpt,
+            "https://chatgpt.com/backend-api/codex",
+            "",
+            "gpt-5.6-sol",
+        ),
         preset(
             "openai",
             ProviderKind::Responses,
@@ -613,6 +677,7 @@ fn preset(
         base_url: Some(base_url.to_string()),
         models_url: None,
         api_key: None,
+        account_id: None,
         api_key_env: if api_key_env.is_empty() {
             None
         } else {

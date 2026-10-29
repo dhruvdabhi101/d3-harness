@@ -57,7 +57,8 @@ pub async fn complete<F: FnMut(&str)>(
         .unwrap_or("")
         .to_string();
 
-    if !content_type.contains("text/event-stream") {
+    let is_sse = content_type.contains("text/event-stream") || content_type.is_empty();
+    if !is_sse {
         let text = response.text().await?;
         let value: Value = serde_json::from_str(&text)?;
         let mut completion = Completion::default();

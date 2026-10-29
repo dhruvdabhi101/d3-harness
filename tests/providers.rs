@@ -296,3 +296,94 @@ async fn responses_handler(State(state): State<Arc<MockState>>, body: String) ->
         .concat())
     }
 }
+
+#[tokio::test]
+async fn chatgpt_auth_uses_account_headers_and_responses_wire() {
+    let app = Router::new().route("/v1/responses", post(chatgpt_handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let project = tempfile::tempdir().unwrap();
+    let config = project.path().join("harness.json");
+    std::fs::write(
+        &config,
+        serde_json::to_string_pretty(&json!({
+            "provider": "chatgpt",
+            "model": "gpt-test",
+            "providers": {
+                "chatgpt": {
+                    "type": "chatgpt",
+                    "base_url": format!("http://{addr}/v1"),
+                    "api_key": "test-access-token",
+                    "account_id": "acct-test",
+                    "model": "gpt-test"
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_harness"))
+        .arg("--config")
+        .arg(&config)
+        .arg("-C")
+        .arg(project.path())
+        .arg("-p")
+        .arg("chatgpt")
+        .arg("say hello")
+        .env_remove("HARNESS_API_KEY")
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "harness failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(stdout.contains("chatgpt mock ok"), "stdout: {stdout}");
+}
+
+async fn chatgpt_handler(headers: axum::http::HeaderMap, body: String) -> Response {
+    let auth = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let account = headers
+        .get("chatgpt-account-id")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let originator = headers
+        .get("originator")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if auth != "Bearer test-access-token" || account != "acct-test" || originator != "codex_cli_rs"
+    {
+        return Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .body(Body::from("bad chatgpt headers"))
+            .unwrap();
+    }
+    let request: Value = serde_json::from_str(&body).unwrap();
+    if request["instructions"].as_str().is_none() || request["input"].as_array().is_none() {
+        return Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::from("not a responses request"))
+            .unwrap();
+    }
+    sse([
+        r#"data: {"type":"response.output_text.delta","delta":"chatgpt mock ok"}
+
+"#,
+        r#"data: {"type":"response.completed","response":{"usage":{"input_tokens":9,"output_tokens":3}}}
+
+"#,
+    ]
+    .concat())
+}

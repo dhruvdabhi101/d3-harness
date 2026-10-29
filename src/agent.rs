@@ -1,9 +1,9 @@
 use crate::conversation::{Block, Message, ToolCall};
 use crate::provider::{Provider, Usage};
 use crate::tools::ToolRegistry;
-use crate::ui;
+use crate::ui_bridge::AgentUi;
 use anyhow::{Result, bail};
-use std::io::Write;
+use std::sync::Arc;
 
 pub struct Agent {
     provider: Provider,
@@ -13,6 +13,7 @@ pub struct Agent {
     messages: Vec<Message>,
     max_steps: usize,
     usage: Usage,
+    ui: Arc<dyn AgentUi>,
 }
 
 impl Agent {
@@ -23,6 +24,7 @@ impl Agent {
         system: String,
         tools: ToolRegistry,
         max_steps: usize,
+        ui: Arc<dyn AgentUi>,
     ) -> Self {
         Self {
             provider,
@@ -32,6 +34,7 @@ impl Agent {
             messages: Vec::new(),
             max_steps,
             usage: Usage::default(),
+            ui,
         }
     }
 
@@ -101,17 +104,16 @@ impl Agent {
         for _step in 0..self.max_steps {
             let definitions = self.tools.definitions();
             let mut printed = false;
+            let ui = self.ui.clone();
             let completion = self
                 .provider
                 .complete(&self.system, &self.messages, &definitions, &mut |delta| {
-                    print!("{delta}");
-                    let _ = std::io::stdout().flush();
+                    ui.text(delta);
                     printed = true;
                 })
                 .await?;
             if printed {
-                println!();
-                let _ = std::io::stdout().flush();
+                ui.text_done();
             }
 
             turn_usage.input_tokens += completion.usage.input_tokens;
@@ -122,16 +124,17 @@ impl Agent {
                     self.messages
                         .push(Message::assistant(completion.text, Vec::new()));
                 } else {
-                    ui::warn("the model returned no text and no tool calls");
+                    self.ui.warn("the model returned no text and no tool calls");
                 }
                 self.usage.input_tokens += turn_usage.input_tokens;
                 self.usage.output_tokens += turn_usage.output_tokens;
-                ui::print_usage(turn_usage.input_tokens, turn_usage.output_tokens);
+                self.ui
+                    .usage(turn_usage.input_tokens, turn_usage.output_tokens);
                 return Ok(());
             }
 
             for call in &completion.tool_calls {
-                print_call(call);
+                self.ui.tool_call(&call.id, &call.name, &call_detail(call));
             }
             let mut assistant = Message::assistant(completion.text, completion.tool_calls.clone());
             if !completion.provider_items.is_empty() {
@@ -143,11 +146,20 @@ impl Agent {
 
             for call in completion.tool_calls {
                 let outcome = self.tools.execute(&call).await;
-                if outcome.is_error {
-                    ui::error(&first_line(&outcome.content));
-                } else if !outcome.summary.is_empty() {
-                    ui::tool_done(&outcome.summary);
+                if call.name == "todo_write" && !outcome.is_error {
+                    let lines = outcome
+                        .summary
+                        .lines()
+                        .map(str::to_string)
+                        .collect::<Vec<_>>();
+                    self.ui.todos(&lines);
                 }
+                let summary = if outcome.is_error {
+                    first_line(&outcome.content)
+                } else {
+                    outcome.summary.clone()
+                };
+                self.ui.tool_result(&call.id, &summary, outcome.is_error);
                 self.messages.push(Message::tool_result(
                     call.id,
                     outcome.content,
@@ -165,15 +177,14 @@ impl Agent {
     }
 }
 
-fn print_call(call: &ToolCall) {
-    let detail = serde_json::from_str::<serde_json::Value>(&call.arguments)
+fn call_detail(call: &ToolCall) -> String {
+    serde_json::from_str::<serde_json::Value>(&call.arguments)
         .ok()
-        .map(|args| call_detail(&call.name, &args))
-        .unwrap_or_default();
-    ui::tool_call(&call.name, &detail);
+        .map(|args| describe_call(&call.name, &args))
+        .unwrap_or_default()
 }
 
-fn call_detail(name: &str, args: &serde_json::Value) -> String {
+fn describe_call(name: &str, args: &serde_json::Value) -> String {
     let text = |key: &str| {
         args.get(key)
             .and_then(serde_json::Value::as_str)

@@ -23,7 +23,7 @@ async fn write_then_edit_changes_only_the_target() {
         McpManager::connect(&McpConfig::default(), dir.path()).await,
         Permissions::default(),
         true,
-        false,
+        std::sync::Arc::new(oc_harness::ui_bridge::ConsoleToolUi::new(false)),
     );
 
     let outcome = tools
@@ -77,7 +77,7 @@ async fn paths_cannot_escape_the_workspace() {
         McpManager::connect(&McpConfig::default(), dir.path()).await,
         Permissions::default(),
         true,
-        false,
+        std::sync::Arc::new(oc_harness::ui_bridge::ConsoleToolUi::new(false)),
     );
 
     let outcome = tools
@@ -113,7 +113,7 @@ async fn glob_and_grep_respect_the_workspace() {
         McpManager::connect(&McpConfig::default(), dir.path()).await,
         Permissions::default(),
         true,
-        false,
+        std::sync::Arc::new(oc_harness::ui_bridge::ConsoleToolUi::new(false)),
     );
 
     let outcome = tools
@@ -179,7 +179,7 @@ async fn skills_load_and_todos_are_visible() {
         McpManager::connect(&McpConfig::default(), dir.path()).await,
         Permissions::default(),
         true,
-        false,
+        std::sync::Arc::new(oc_harness::ui_bridge::ConsoleToolUi::new(false)),
     );
 
     let outcome = tools
@@ -214,7 +214,7 @@ async fn shell_runs_in_the_workspace() {
             ..Default::default()
         },
         true,
-        false,
+        std::sync::Arc::new(oc_harness::ui_bridge::ConsoleToolUi::new(false)),
     );
     let outcome = tools
         .execute(&call(

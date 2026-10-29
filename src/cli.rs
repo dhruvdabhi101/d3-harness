@@ -64,6 +64,10 @@ pub struct Cli {
     #[arg(short = 'q', long)]
     pub quiet: bool,
 
+    /// Use the plain line-based REPL instead of the full-screen TUI.
+    #[arg(long)]
+    pub no_tui: bool,
+
     /// Disable colored output.
     #[arg(long)]
     pub no_color: bool,
