@@ -94,10 +94,6 @@ pub fn info(text: &str) {
     eprintln!("{}", dim(text));
 }
 
-pub fn assistant_prefix() {
-    // Streaming text follows the prefix. Kept separate so piped output stays clean.
-}
-
 pub fn print_usage(input: u64, output: u64) {
     if input == 0 && output == 0 {
         return;
@@ -154,8 +150,4 @@ pub fn read_line(prompt: &str) -> io::Result<Option<String>> {
         return Ok(None);
     }
     Ok(Some(line))
-}
-
-pub fn ask(question: &str) -> io::Result<Option<String>> {
-    read_line(&format!("{} {question} ", cyan("?")))
 }
