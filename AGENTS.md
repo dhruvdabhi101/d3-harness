@@ -50,5 +50,10 @@ Run the binary from source with `cargo run -- <args>` or
   or provider boundary.
 - TUI code must restore the terminal on every exit path and must not read from
   stdin directly; approvals and questions go through `ToolUi`.
-- ChatGPT auth reads Codex CLI credentials at runtime. Never copy those tokens
-  into harness config or logs.
+- Provider selection and authentication belong inside the TUI. `/provider`
+  switches providers and `/login` starts the ChatGPT device-code flow.
+- ChatGPT auth uses the official `codex login --device-auth` device flow and reads
+  Codex credentials at runtime. Never copy those tokens into harness config or
+  logs.
+- Before starting a device login, preserve any existing Codex auth file so a
+  cancelled or failed login does not log the user out.

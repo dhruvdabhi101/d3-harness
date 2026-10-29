@@ -46,6 +46,14 @@ impl Agent {
         &self.provider.name
     }
 
+    pub fn set_provider(&mut self, provider: Provider, model: String) {
+        let old = format!("- Model: {}/{}\n", self.provider.name, self.model);
+        let new = format!("- Model: {}/{}\n", provider.name, model);
+        self.system = self.system.replace(&old, &new);
+        self.provider = provider;
+        self.model = model;
+    }
+
     pub fn set_model(&mut self, model: String) {
         let old = format!("- Model: {}/{}\n", self.provider.name, self.model);
         let new = format!("- Model: {}/{}\n", self.provider.name, model);

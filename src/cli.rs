@@ -56,7 +56,7 @@ pub struct Cli {
     #[arg(long)]
     pub list_models: bool,
 
-    /// Ask for an API key, save it, verify it, and exit.
+    /// Sign in (or verify the existing ChatGPT login), then exit.
     #[arg(long)]
     pub login: bool,
 

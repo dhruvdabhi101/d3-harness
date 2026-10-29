@@ -69,8 +69,23 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
 
     if cli.login {
         let auth = if provider_cfg.kind == Some(ProviderKind::ChatGpt) {
-            let auth = config::codex_auth()?;
-            ui::info("using the ChatGPT login saved by Codex CLI");
+            let auth = match config::codex_auth() {
+                Ok(auth) => {
+                    ui::info("using the ChatGPT login saved by Codex CLI");
+                    auth
+                }
+                Err(_) => {
+                    ui::info("starting ChatGPT device sign-in…");
+                    let status = std::process::Command::new("codex")
+                        .args(["login", "--device-auth"])
+                        .status()
+                        .context("starting `codex login --device-auth`")?;
+                    if !status.success() {
+                        anyhow::bail!("ChatGPT sign-in did not complete");
+                    }
+                    config::codex_auth()?
+                }
+            };
             ProviderAuth {
                 key: auth.access_token,
                 account_id: Some(auth.account_id),
@@ -175,32 +190,31 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
-    let (auth, had_key) = provider_auth(&provider_name, &provider_cfg, interactive)?;
-    let provider = Provider::new(
-        provider_name.clone(),
-        provider_cfg.clone(),
-        model.clone(),
-        auth,
-    )?;
-    if !had_key && interactive {
-        match provider.list_models().await {
-            Ok(_) => ui::info("API key accepted"),
-            Err(error) => {
-                let message = format!("{error:#}");
-                if message.contains("401") || message.contains("403") {
-                    let _ = config::remove_api_key(&provider_name);
-                    anyhow::bail!(
-                        "the provider rejected the API key. Run `harness --login -p {provider_name}` to try again."
-                    );
-                }
-            }
-        }
-    }
-
     let prompt_text = prompt_from_args(&cli.prompt, interactive)?;
     let max_steps = cfg.max_steps.unwrap_or(40);
 
     if let Some(text) = prompt_text.filter(|text| !text.trim().is_empty()) {
+        let (auth, had_key) = provider_auth(&provider_name, &provider_cfg, interactive)?;
+        let provider = Provider::new(
+            provider_name.clone(),
+            provider_cfg.clone(),
+            model.clone(),
+            auth,
+        )?;
+        if !had_key && interactive {
+            match provider.list_models().await {
+                Ok(_) => ui::info("API key accepted"),
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    if message.contains("401") || message.contains("403") {
+                        let _ = config::remove_api_key(&provider_name);
+                        anyhow::bail!(
+                            "the provider rejected the API key. Run `harness --login -p {provider_name}` to try again."
+                        );
+                    }
+                }
+            }
+        }
         let tools = ToolRegistry::new(
             cwd.clone(),
             skills,
@@ -243,6 +257,21 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             setup.tool_ui.clone(),
         );
         let tool_count = tools.specs().len();
+        let connected = provider_connected(&provider_name, &provider_cfg);
+        let auth = if connected {
+            provider_auth(&provider_name, &provider_cfg, false)?.0
+        } else {
+            ProviderAuth {
+                key: String::new(),
+                account_id: None,
+            }
+        };
+        let provider = Provider::new(
+            provider_name.clone(),
+            provider_cfg.clone(),
+            model.clone(),
+            auth,
+        )?;
         let info = tui::app::TuiInfo {
             provider: provider_name.clone(),
             model: model.clone(),
@@ -252,6 +281,8 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             mcp: mcp_count,
             tools: tool_count,
             auto_approve: cfg.auto_approve,
+            connected,
+            providers: provider_choices(&cfg),
         };
         let agent = agent::Agent::new(
             provider,
@@ -265,6 +296,13 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
         return tui::run(agent, setup, info).await;
     }
 
+    let (auth, _) = provider_auth(&provider_name, &provider_cfg, interactive)?;
+    let provider = Provider::new(
+        provider_name.clone(),
+        provider_cfg.clone(),
+        model.clone(),
+        auth,
+    )?;
     let tools = ToolRegistry::new(
         cwd.clone(),
         skills,
@@ -388,6 +426,51 @@ pub fn parse_and_run() -> Result<()> {
     let cli = <Cli as clap::Parser>::parse();
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(run_cli(cli))
+}
+
+fn provider_connected(name: &str, config: &config::ProviderConfig) -> bool {
+    if config.kind == Some(ProviderKind::ChatGpt) {
+        return config::codex_auth().is_ok();
+    }
+    if config::find_api_key(name, config).is_some() {
+        return true;
+    }
+    config.api_key.is_none()
+        && config.api_key_env.is_none()
+        && config
+            .base_url
+            .as_deref()
+            .is_some_and(|base| base.contains("localhost") || base.contains("127.0.0.1"))
+}
+
+fn provider_choices(cfg: &Config) -> Vec<tui::app::ProviderChoice> {
+    let mut names = config::provider_presets()
+        .into_iter()
+        .map(|preset| preset.name)
+        .collect::<Vec<_>>();
+    for name in cfg.providers.keys() {
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+    names
+        .into_iter()
+        .filter(|name| name != "openai" && name != "codex")
+        .filter_map(|name| {
+            let config = cfg.provider_config(&name).ok()?;
+            let model = cfg
+                .providers
+                .get(&name)
+                .and_then(|provider| provider.model.clone())
+                .or_else(|| config.model.clone())
+                .unwrap_or_default();
+            Some(tui::app::ProviderChoice {
+                name,
+                model,
+                config,
+            })
+        })
+        .collect()
 }
 
 fn provider_auth(

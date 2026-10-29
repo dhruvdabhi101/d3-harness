@@ -53,9 +53,12 @@ Run without a prompt for the full-screen interface:
 harness
 ```
 
-If no key is configured, the harness asks for it before opening the TUI, saves
-it with `0600` permissions, verifies it against the provider's model catalog,
-and starts. Reuse is automatic on the next run.
+The TUI handles first-run setup itself. If the selected provider has no
+credentials, it opens a provider picker and a sign-in screen. ChatGPT uses the
+official device-code flow: harness displays the URL and one-time code, waits for
+approval, then connects without leaving the UI. API-key providers ask for the key
+inside a masked modal. Credentials are saved with `0600` permissions and reused
+on the next run.
 
 Options must come before the prompt. `harness "prompt" --yes` treats `--yes` as
 part of the prompt.
@@ -90,6 +93,8 @@ Features:
 - Streamed assistant text with light markdown and code styling.
 - Tool calls as live rows with spinner, result summary, and color-coded diffs.
 - Slash-command palette that opens as soon as you type `/`.
+- Provider picker via `/provider`, with sign-in without leaving the TUI.
+- ChatGPT device-code sign-in via `/login`, including the URL and one-time code.
 - Live model picker via `/models`, fetched from the provider catalog.
 - Approval modal for shell commands, with the exact command shown.
 - Question modal for `ask_user`, with options and free-form input.
@@ -113,6 +118,7 @@ Keybindings:
 | `Ctrl+C` twice | quit while a turn is running |
 | `Ctrl+D` | quit when the input is empty |
 | `Esc` | close palette/modal, deny approval, or clear input |
+| `o` in ChatGPT sign-in | open the verification URL in your browser |
 
 The plain line-based REPL is still available with `--no-tui`.
 
@@ -249,23 +255,24 @@ Keys can also come from the provider's environment variable, an `api_key` in
 
 ### ChatGPT / OpenAI account authentication
 
-There are two OpenAI paths:
+OpenAI in the TUI uses account authentication, not an API key:
 
-- `-p openai` uses an OpenAI API key. It prompts for one on first use exactly like
-  OpenCode does.
-- `-p chatgpt` uses a ChatGPT plan login. The harness reads the credentials that
-  the Codex CLI already stores in `~/.codex/auth.json` (or `$CODEX_HOME`), calls
-  the ChatGPT Codex backend, and lists models from `models_cache.json`.
+- The `chatgpt` provider signs in with ChatGPT using the official device-code
+  flow. The TUI shows `https://auth.openai.com/codex/device` and a one-time code,
+  waits for browser approval, then connects.
+- It drives the official `codex login --device-auth` command, so the `codex` CLI
+  must be installed (`npm install -g @openai/codex`). No separate `codex login`
+  is required; the TUI starts it and keeps the code and status on screen.
+- After sign-in, harness uses the tokens stored by Codex at runtime and calls the
+  ChatGPT Codex backend. It never copies those tokens into harness config.
+- Models come from the Codex model list, fetched by the provider or read from
+  `models_cache.json` when offline.
+- If an existing Codex login is present, choosing `chatgpt` connects immediately.
+  Use `/login` to force a fresh device sign-in.
 
-```bash
-codex login            # once, using the official Codex CLI
-harness -p chatgpt     # harness reuses that login
-harness -p chatgpt --list-models
-```
-
-`harness --login -p chatgpt` verifies the existing Codex login instead of
-prompting. The token never gets copied into harness config; it is read from the
-Codex auth file at runtime. If you prefer key-based auth, use `-p openai`.
+OpenAI API-key providers (`openai`, `codex`) remain available to the CLI and
+custom `harness.json` setups, but they are intentionally hidden from the TUI
+provider picker. The TUI path is the account sign-in flow.
 
 The ChatGPT provider speaks the same Responses wire format as the OpenAI
 provider, including reasoning-item replay for tool calls.
@@ -423,7 +430,8 @@ Interactive commands:
 /new               clear the conversation
 /model [id]        show or change the model
 /models            fetch the provider's models and choose one
-/provider          show the current provider
+/provider          choose and switch provider
+/login             sign in with ChatGPT or update a key
 /system            how to change the system prompt
 /tools             list available tools
 /skills            list available skills

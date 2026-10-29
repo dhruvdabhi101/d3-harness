@@ -1,6 +1,7 @@
 use super::input::InputBuffer;
-use super::{AgentNotice, ToolRequest, WorkerCommand, WorkerEvent};
-use crate::provider::ModelInfo;
+use super::{AgentNotice, LoginEvent, ToolRequest, WorkerCommand, WorkerEvent};
+use crate::config::{self, ProviderConfig, ProviderKind};
+use crate::provider::{ModelInfo, Provider, ProviderAuth};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
 use ratatui::{
     Frame,
@@ -23,6 +24,13 @@ const DIM: Color = Color::Rgb(135, 135, 145);
 const FAINT: Color = Color::Rgb(80, 80, 90);
 const CODE_BG: Color = Color::Rgb(36, 36, 42);
 
+#[derive(Clone)]
+pub struct ProviderChoice {
+    pub name: String,
+    pub model: String,
+    pub config: ProviderConfig,
+}
+
 pub struct TuiInfo {
     pub provider: String,
     pub model: String,
@@ -32,6 +40,8 @@ pub struct TuiInfo {
     pub mcp: usize,
     pub tools: usize,
     pub auto_approve: bool,
+    pub connected: bool,
+    pub providers: Vec<ProviderChoice>,
 }
 
 pub struct App {
@@ -56,6 +66,10 @@ pub struct App {
     output_tokens: u64,
     todos: Vec<String>,
     commands: mpsc::UnboundedSender<WorkerCommand>,
+    login_tx: mpsc::UnboundedSender<super::LoginEvent>,
+    login_task: Option<tokio::task::AbortHandle>,
+    connected: bool,
+    providers: Vec<ProviderChoice>,
     pub should_quit: bool,
     pub dirty: bool,
 }
@@ -100,6 +114,7 @@ struct Palette {
 enum PaletteKind {
     Commands,
     Models,
+    Providers,
 }
 
 #[derive(Clone)]
@@ -121,6 +136,17 @@ enum Modal {
         selected: usize,
         input: InputBuffer,
         response: Option<oneshot::Sender<Option<String>>>,
+    },
+    ApiKey {
+        provider: ProviderChoice,
+        input: InputBuffer,
+    },
+    Login {
+        provider: ProviderChoice,
+        url: Option<String>,
+        code: Option<String>,
+        status: String,
+        failed: bool,
     },
 }
 
@@ -148,7 +174,7 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "/provider",
-        description: "show the current provider",
+        description: "choose and switch provider",
     },
     CommandSpec {
         name: "/tools",
@@ -176,7 +202,7 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "/login",
-        description: "how to change API credentials",
+        description: "sign in with ChatGPT or update a key",
     },
     CommandSpec {
         name: "/exit",
@@ -185,8 +211,14 @@ const COMMANDS: &[CommandSpec] = &[
 ];
 
 impl App {
-    pub fn new(info: TuiInfo, commands: mpsc::UnboundedSender<WorkerCommand>) -> Self {
+    pub fn new(
+        info: TuiInfo,
+        commands: mpsc::UnboundedSender<WorkerCommand>,
+        login_tx: mpsc::UnboundedSender<super::LoginEvent>,
+    ) -> Self {
         let model = info.model.clone();
+        let connected = info.connected;
+        let providers = info.providers.clone();
         let mut app = Self {
             info,
             model,
@@ -209,12 +241,22 @@ impl App {
             output_tokens: 0,
             todos: Vec::new(),
             commands,
+            login_tx,
+            login_task: None,
+            connected,
+            providers,
             should_quit: false,
             dirty: true,
         };
-        app.push_info(
-            "Welcome. Type a request, or / for the command palette. Shift+Enter adds a newline.",
-        );
+        if connected {
+            app.push_info(
+                "Welcome. Type a request, or / for the command palette. Shift+Enter adds a newline.",
+            );
+        } else {
+            app.status = "choose provider".to_string();
+            app.push_info("Choose a provider, then sign in. Everything stays inside this screen.");
+            app.open_provider_palette();
+        }
         app
     }
 
@@ -538,6 +580,7 @@ impl App {
         let title = match palette.kind {
             PaletteKind::Commands => " commands ",
             PaletteKind::Models => " models ",
+            PaletteKind::Providers => " providers ",
         };
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
@@ -577,7 +620,7 @@ impl App {
 
     fn draw_modal(&self, frame: &mut Frame, modal: &Modal, area: Rect) {
         let width = area.width.saturating_sub(8).min(84);
-        let height = area.height.saturating_sub(6).min(18);
+        let height = area.height.saturating_sub(6).min(20);
         let x = area.x + (area.width.saturating_sub(width)) / 2;
         let y = area.y + (area.height.saturating_sub(height)) / 2;
         let rect = Rect {
@@ -587,9 +630,11 @@ impl App {
             height,
         };
         frame.render_widget(Clear, rect);
-        let (title, body) = match modal {
-            Modal::Confirm { title, body, .. } => (title.as_str(), body.as_str()),
-            Modal::Ask { question, .. } => ("question", question.as_str()),
+        let title = match modal {
+            Modal::Confirm { title, .. } => title.as_str(),
+            Modal::Ask { .. } => "question",
+            Modal::ApiKey { .. } => "sign in",
+            Modal::Login { .. } => "ChatGPT sign-in",
         };
         let block = Block::bordered()
             .border_type(BorderType::Double)
@@ -602,59 +647,129 @@ impl App {
         frame.render_widget(block, rect);
 
         let mut lines = Vec::new();
-        for line in body.lines() {
-            lines.push(Line::from(Span::styled(
-                line.to_string(),
-                Style::default().fg(Color::Rgb(225, 225, 230)),
-            )));
-        }
-        if let Modal::Ask {
-            options,
-            selected,
-            input,
-            ..
-        } = modal
-        {
-            lines.push(Line::default());
-            if options.is_empty() {
-                lines.push(Line::from(vec![
-                    Span::styled("> ", Style::default().fg(ACCENT)),
-                    Span::raw(input.text().to_string()),
-                    Span::styled("▌", Style::default().fg(ACCENT)),
-                ]));
-            } else {
-                for (index, option) in options.iter().enumerate() {
-                    let style = if index == *selected {
-                        Style::default()
-                            .fg(Color::Rgb(20, 20, 24))
-                            .bg(ACCENT)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(DIM)
-                    };
+        match modal {
+            Modal::Confirm { body, .. } => {
+                for line in body.lines() {
                     lines.push(Line::from(Span::styled(
-                        format!("  {}. {}", index + 1, option),
-                        style,
+                        line.to_string(),
+                        Style::default().fg(Color::Rgb(225, 225, 230)),
                     )));
                 }
                 lines.push(Line::default());
+                lines.push(Line::from(Span::styled(
+                    "[y] allow · [n] deny · Esc deny",
+                    Style::default().fg(FAINT),
+                )));
+            }
+            Modal::Ask {
+                question,
+                options,
+                selected,
+                input,
+                ..
+            } => {
+                for line in question.lines() {
+                    lines.push(Line::from(Span::styled(
+                        line.to_string(),
+                        Style::default().fg(Color::Rgb(225, 225, 230)),
+                    )));
+                }
+                lines.push(Line::default());
+                if options.is_empty() {
+                    lines.push(Line::from(vec![
+                        Span::styled("> ", Style::default().fg(ACCENT)),
+                        Span::raw(input.text().to_string()),
+                        Span::styled("▌", Style::default().fg(ACCENT)),
+                    ]));
+                } else {
+                    for (index, option) in options.iter().enumerate() {
+                        let style = if index == *selected {
+                            Style::default()
+                                .fg(Color::Rgb(20, 20, 24))
+                                .bg(ACCENT)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(DIM)
+                        };
+                        lines.push(Line::from(Span::styled(
+                            format!("  {}. {}", index + 1, option),
+                            style,
+                        )));
+                    }
+                    lines.push(Line::default());
+                    lines.push(Line::from(vec![
+                        Span::styled("> ", Style::default().fg(ACCENT)),
+                        Span::raw(input.text().to_string()),
+                        Span::styled("▌", Style::default().fg(ACCENT)),
+                    ]));
+                }
+                lines.push(Line::default());
+                lines.push(Line::from(Span::styled(
+                    "Enter submit · ↑/↓ choose · Esc skip",
+                    Style::default().fg(FAINT),
+                )));
+            }
+            Modal::ApiKey { provider, input } => {
+                lines.push(Line::from(Span::styled(
+                    format!("Sign in to {}", provider.name),
+                    Style::default().fg(Color::Rgb(225, 225, 230)),
+                )));
+                lines.push(Line::default());
+                lines.push(Line::from(Span::styled(
+                    "Paste the provider's key. Input is hidden.",
+                    Style::default().fg(DIM),
+                )));
+                lines.push(Line::default());
+                let masked = "•".repeat(input.text().chars().count());
                 lines.push(Line::from(vec![
                     Span::styled("> ", Style::default().fg(ACCENT)),
-                    Span::raw(input.text().to_string()),
+                    Span::styled(masked, Style::default().fg(GREEN)),
                     Span::styled("▌", Style::default().fg(ACCENT)),
                 ]));
+                lines.push(Line::default());
+                lines.push(Line::from(Span::styled(
+                    "Enter sign in · Esc cancel",
+                    Style::default().fg(FAINT),
+                )));
             }
-            lines.push(Line::default());
-            lines.push(Line::from(Span::styled(
-                "Enter submit · ↑/↓ choose · Esc skip",
-                Style::default().fg(FAINT),
-            )));
-        } else {
-            lines.push(Line::default());
-            lines.push(Line::from(Span::styled(
-                "[y] allow · [n] deny · Esc deny",
-                Style::default().fg(FAINT),
-            )));
+            Modal::Login {
+                provider,
+                url,
+                code,
+                status,
+                failed,
+            } => {
+                lines.push(Line::from(Span::styled(
+                    format!("Sign in to {} with your ChatGPT account.", provider.name),
+                    Style::default().fg(Color::Rgb(225, 225, 230)),
+                )));
+                lines.push(Line::default());
+                if let Some(url) = url {
+                    lines.push(Line::from(vec![
+                        Span::styled("Open  ", Style::default().fg(DIM)),
+                        Span::styled(url.clone(), Style::default().fg(TOOL)),
+                    ]));
+                }
+                if let Some(code) = code.as_ref().filter(|code| !code.is_empty()) {
+                    lines.push(Line::from(vec![
+                        Span::styled("Code  ", Style::default().fg(DIM)),
+                        Span::styled(
+                            code.clone(),
+                            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+                }
+                lines.push(Line::default());
+                lines.push(Line::from(Span::styled(
+                    status.clone(),
+                    Style::default().fg(if *failed { RED } else { YELLOW }),
+                )));
+                lines.push(Line::default());
+                lines.push(Line::from(Span::styled(
+                    "o open browser · Esc cancel",
+                    Style::default().fg(FAINT),
+                )));
+            }
         }
         frame.render_widget(
             Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
@@ -925,6 +1040,10 @@ impl App {
                             self.input.clear();
                             self.set_model(&item.value);
                         }
+                        PaletteKind::Providers => {
+                            self.input.clear();
+                            self.switch_provider(&item.value);
+                        }
                     }
                 }
             }
@@ -1026,12 +1145,95 @@ impl App {
                     _ => self.modal = Some(modal),
                 }
             }
+            Modal::ApiKey { provider, input } => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => {
+                    let key = input.text().trim().to_string();
+                    if key.is_empty() {
+                        self.modal = Some(modal);
+                        return;
+                    }
+                    let provider = provider.clone();
+                    if let Err(error) = config::store_api_key(&provider.name, &key) {
+                        self.push_warn(format!("could not save the key: {error:#}"));
+                    }
+                    self.complete_connect(
+                        provider,
+                        ProviderAuth {
+                            key,
+                            account_id: None,
+                        },
+                    );
+                }
+                KeyCode::Char(ch) => {
+                    input.insert_char(ch);
+                    self.modal = Some(modal);
+                }
+                KeyCode::Backspace => {
+                    input.backspace();
+                    self.modal = Some(modal);
+                }
+                _ => self.modal = Some(modal),
+            },
+            Modal::Login { url, .. } => {
+                if key.code == KeyCode::Esc {
+                    if let Some(task) = self.login_task.take() {
+                        task.abort();
+                    }
+                } else {
+                    if key.code == KeyCode::Char('o')
+                        && let Some(url) = url.as_deref()
+                    {
+                        open_browser(url);
+                    }
+                    self.modal = Some(modal);
+                }
+            }
         }
+    }
+
+    pub fn handle_login_event(&mut self, event: LoginEvent) {
+        match event {
+            LoginEvent::Code { url, code } => {
+                if let Some(Modal::Login {
+                    url: current_url,
+                    code: current_code,
+                    status,
+                    ..
+                }) = &mut self.modal
+                {
+                    *current_url = Some(url);
+                    if !code.is_empty() {
+                        *current_code = Some(code);
+                    }
+                    *status = "waiting for approval in the browser…".to_string();
+                }
+            }
+            LoginEvent::Success => {
+                self.login_task = None;
+                if let Some(Modal::Login { provider, .. }) = self.modal.take() {
+                    self.finish_login(provider);
+                }
+            }
+            LoginEvent::Failed(error) => {
+                self.login_task = None;
+                if let Some(Modal::Login { status, failed, .. }) = &mut self.modal {
+                    *status = error;
+                    *failed = true;
+                }
+            }
+        }
+        self.dirty = true;
     }
 
     fn submit(&mut self) {
         let text = self.input.text().trim().to_string();
         if text.is_empty() {
+            return;
+        }
+        if !self.connected && !text.starts_with('/') {
+            self.push_warn("choose a provider and sign in first");
+            self.open_provider_palette();
             return;
         }
         if !text.starts_with('/') && self.busy {
@@ -1082,6 +1284,11 @@ impl App {
                 }
             }
             "/models" => {
+                if !self.connected {
+                    self.push_warn("choose a provider and sign in first");
+                    self.open_provider_palette();
+                    return;
+                }
                 if self.busy {
                     self.push_warn("wait for the current turn to finish first");
                     return;
@@ -1089,7 +1296,7 @@ impl App {
                 self.status = "loading models".to_string();
                 let _ = self.commands.send(WorkerCommand::ListModels);
             }
-            "/provider" => self.push_info(format!("provider: {}", self.info.provider)),
+            "/provider" => self.open_provider_palette(),
             "/tools" => self.push_info(format!(
                 "{} tools: read, write, edit, bash, glob, grep, ask_user, todo_write, skill",
                 self.info.tools
@@ -1120,10 +1327,30 @@ impl App {
             "/system" => self.push_info(
                 "restart with --system-file <path> or --system-prompt <text> to change the core prompt",
             ),
-            "/login" => self.push_info(format!(
-                "restart with `harness --login -p {}` to rotate credentials",
-                self.info.provider
-            )),
+            "/login" => {
+                if self.busy {
+                    self.push_warn("wait for the current turn to finish first");
+                    return;
+                }
+                let Some(choice) = self
+                    .providers
+                    .iter()
+                    .find(|provider| provider.name == self.info.provider)
+                    .cloned()
+                else {
+                    self.push_warn("no provider selected");
+                    return;
+                };
+                if choice.config.kind == Some(ProviderKind::ChatGpt) {
+                    self.start_login(choice);
+                } else {
+                    self.modal = Some(Modal::ApiKey {
+                        provider: choice,
+                        input: InputBuffer::new(),
+                    });
+                    self.status = "sign in".to_string();
+                }
+            }
             "/exit" | "/quit" => self.should_quit = true,
             other => self.push_warn(format!("unknown command {other}; try /help")),
         }
@@ -1139,6 +1366,127 @@ impl App {
             .commands
             .send(WorkerCommand::SetModel(model.to_string()));
         self.push_info(format!("model: {model}"));
+    }
+
+    fn open_provider_palette(&mut self) {
+        self.palette = Some(Palette {
+            kind: PaletteKind::Providers,
+            items: self
+                .providers
+                .iter()
+                .map(|provider| PaletteItem {
+                    label: provider.name.clone(),
+                    description: provider.model.clone(),
+                    value: provider.name.clone(),
+                })
+                .collect(),
+            selected: self
+                .providers
+                .iter()
+                .position(|provider| provider.name == self.info.provider)
+                .unwrap_or(0),
+        });
+    }
+
+    fn switch_provider(&mut self, name: &str) {
+        if self.busy {
+            self.push_warn("wait for the current turn to finish before switching providers");
+            return;
+        }
+        let Some(choice) = self
+            .providers
+            .iter()
+            .find(|provider| provider.name == name)
+            .cloned()
+        else {
+            self.push_warn(format!("unknown provider {name}"));
+            return;
+        };
+        if choice.config.kind == Some(ProviderKind::ChatGpt) {
+            match config::codex_auth() {
+                Ok(auth) => {
+                    self.complete_connect(
+                        choice,
+                        ProviderAuth {
+                            key: auth.access_token,
+                            account_id: Some(auth.account_id),
+                        },
+                    );
+                }
+                Err(_) => self.start_login(choice),
+            }
+            return;
+        }
+        if let Some(key) = provider_key(&choice) {
+            self.complete_connect(
+                choice,
+                ProviderAuth {
+                    key,
+                    account_id: None,
+                },
+            );
+        } else {
+            self.modal = Some(Modal::ApiKey {
+                provider: choice,
+                input: InputBuffer::new(),
+            });
+            self.status = "sign in".to_string();
+        }
+    }
+
+    fn complete_connect(&mut self, choice: ProviderChoice, auth: ProviderAuth) {
+        match Provider::new(
+            choice.name.clone(),
+            choice.config.clone(),
+            choice.model.clone(),
+            auth,
+        ) {
+            Ok(provider) => {
+                let _ = self.commands.send(WorkerCommand::SetProvider(
+                    Box::new(provider),
+                    choice.model.clone(),
+                ));
+                self.info.provider = choice.name.clone();
+                self.model = choice.model.clone();
+                self.connected = true;
+                self.status = "ready".to_string();
+                self.palette = None;
+                self.push_info(format!("connected to {}/{}", choice.name, choice.model));
+            }
+            Err(error) => {
+                self.push_warn(format!("could not connect to {}: {error:#}", choice.name))
+            }
+        }
+    }
+
+    fn start_login(&mut self, provider: ProviderChoice) {
+        if let Some(task) = self.login_task.take() {
+            task.abort();
+        }
+        self.modal = Some(Modal::Login {
+            provider,
+            url: None,
+            code: None,
+            status: "starting device sign-in…".to_string(),
+            failed: false,
+        });
+        self.status = "sign in".to_string();
+        let tx = self.login_tx.clone();
+        let task = tokio::spawn(super::codex_device_login(tx));
+        self.login_task = Some(task.abort_handle());
+    }
+
+    fn finish_login(&mut self, provider: ProviderChoice) {
+        match config::codex_auth() {
+            Ok(auth) => self.complete_connect(
+                provider,
+                ProviderAuth {
+                    key: auth.access_token,
+                    account_id: Some(auth.account_id),
+                },
+            ),
+            Err(error) => self.push_warn(format!("sign-in did not produce credentials: {error:#}")),
+        }
     }
 
     fn open_command_palette(&mut self) {
@@ -1173,9 +1521,7 @@ impl App {
         palette.items = COMMANDS
             .iter()
             .filter(|command| {
-                query.is_empty()
-                    || command.name[1..].to_ascii_lowercase().starts_with(&query)
-                    || command.description.to_ascii_lowercase().contains(&query)
+                query.is_empty() || command.name[1..].to_ascii_lowercase().contains(&query)
             })
             .map(|command| PaletteItem {
                 label: command.name.to_string(),
@@ -1411,6 +1757,34 @@ impl App {
     }
 }
 
+fn open_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    let command = "open";
+    #[cfg(target_os = "windows")]
+    let command = "explorer";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let command = "xdg-open";
+    let _ = std::process::Command::new(command)
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+fn provider_key(choice: &ProviderChoice) -> Option<String> {
+    if let Some(key) = config::find_api_key(&choice.name, &choice.config) {
+        return Some(key);
+    }
+    if choice.config.api_key.is_none()
+        && choice.config.api_key_env.is_none()
+        && let Some(base) = &choice.config.base_url
+        && (base.contains("localhost") || base.contains("127.0.0.1"))
+    {
+        return Some("local".to_string());
+    }
+    None
+}
+
 fn assistant_lines(text: &str, streaming: bool, frame_index: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut code = false;
@@ -1591,6 +1965,7 @@ mod tests {
 
     fn app() -> (App, mpsc::UnboundedReceiver<WorkerCommand>) {
         let (tx, rx) = mpsc::unbounded_channel();
+        let (login_tx, _login_rx) = mpsc::unbounded_channel();
         let info = TuiInfo {
             provider: "test".to_string(),
             model: "test-model".to_string(),
@@ -1600,8 +1975,10 @@ mod tests {
             mcp: 0,
             tools: 9,
             auto_approve: false,
+            connected: true,
+            providers: Vec::new(),
         };
-        (App::new(info, tx), rx)
+        (App::new(info, tx, login_tx), rx)
     }
 
     fn key(app: &mut App, code: KeyCode) {
@@ -1654,6 +2031,43 @@ mod tests {
         let screen = text(&mut app);
         assert!(screen.contains("hi there"), "{screen}");
         app.handle_worker_event(WorkerEvent::TurnDone(Ok(())));
+    }
+
+    #[test]
+    fn switching_providers_rebuilds_the_agent_provider() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (login_tx, _login_rx) = mpsc::unbounded_channel();
+        let choice = ProviderChoice {
+            name: "alt".to_string(),
+            model: "alt-model".to_string(),
+            config: ProviderConfig {
+                base_url: Some("http://127.0.0.1:1/v1".to_string()),
+                api_key: Some("test-key".to_string()),
+                kind: Some(ProviderKind::OpenAi),
+                model: Some("alt-model".to_string()),
+                ..Default::default()
+            },
+        };
+        let info = TuiInfo {
+            provider: "alt".to_string(),
+            model: "alt-model".to_string(),
+            workspace: PathBuf::from("/tmp/test-workspace"),
+            branch: None,
+            skills: 0,
+            mcp: 0,
+            tools: 9,
+            auto_approve: false,
+            connected: false,
+            providers: vec![choice],
+        };
+        let mut app = App::new(info, tx, login_tx);
+        app.switch_provider("alt");
+        assert!(app.connected);
+        assert_eq!(app.model, "alt-model");
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            WorkerCommand::SetProvider(_, _)
+        ));
     }
 
     #[test]
