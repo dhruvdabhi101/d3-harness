@@ -25,12 +25,15 @@ cargo install --path .
 
 ## Quick start with OpenCode
 
-Get an API key from <https://opencode.ai/auth>, then:
+Run it:
 
 ```bash
-export OPENCODE_API_KEY="..."
 harness "explain what this repository does"
 ```
+
+If no key is configured, the harness asks for one, hides the input, saves it to
+the user config directory, and uses it immediately. The next run reuses it. You
+can also set `OPENCODE_API_KEY` yourself.
 
 The default provider is `opencode` and the default model is
 `deepseek-v4.1-flash`. Any model available through OpenCode Console can be
@@ -39,6 +42,7 @@ selected:
 ```bash
 harness -m gpt-5.3-codex "fix the failing test"
 harness -m claude-sonnet-4-5 "review this diff"
+harness --list-models
 ```
 
 Run without a prompt for an interactive session:
@@ -67,6 +71,10 @@ part of the prompt.
 - **Providers**: OpenCode, OpenAI/Codex (Responses API), Anthropic Messages,
   OpenRouter, DeepSeek, Groq, Mistral, xAI, Ollama, LM Studio, and custom
   OpenAI-compatible endpoints.
+- **First-run setup**: asks for a missing API key in the terminal, hides the
+  input, stores it with `0600` permissions, and reuses it next time.
+- **Model discovery**: fetches the provider's model catalog and supports
+  `harness --list-models` and the interactive `/models` picker.
 - **Streaming**: SSE streaming for Chat Completions, Anthropic Messages, and
   OpenAI Responses. Non-streaming JSON responses also work.
 
@@ -88,7 +96,8 @@ Built-in presets:
 | `ollama` | OpenAI compatible | none (uses `local`) | `qwen3-coder` |
 | `lmstudio` | OpenAI compatible | none (uses `local`) | `local-model` |
 
-List them with `harness --list-providers`.
+List them with `harness --list-providers`, and fetch the selected provider's
+models with `harness --list-models`.
 
 ### Custom providers
 
@@ -117,9 +126,18 @@ List them with `harness --list-providers`.
 or `anthropic` (Messages). `base_url` should be the API root; the harness appends
 `/chat/completions`, `/responses`, or `/messages`.
 
-A provider can also set `"api_key"` directly. `HARNESS_API_KEY` overrides every
-provider key. For `opencode`, the harness falls back to OpenCode's
-`auth.json` if it can find it.
+A provider can also set `"api_key"` directly, or point at a non-standard model
+catalog with `"models_url"`. `HARNESS_API_KEY` overrides every provider key. For
+`opencode`, the harness falls back to OpenCode's `auth.json` if it can find it.
+
+OpenCode's model list lives at a different path from its Chat Completions
+endpoint, so the built-in `opencode` preset sets:
+
+```json
+"models_url": "https://opencode.ai/inference/v1/models"
+```
+
+The default for other providers is `<base_url>/models`.
 
 If you already use Codex models through OpenCode, this works too because
 OpenCode's gateway translates text models across its APIs:
@@ -139,6 +157,28 @@ The harness reads configuration in this order:
 
 Environment overrides: `HARNESS_PROVIDER`, `HARNESS_MODEL`,
 `HARNESS_MAX_STEPS`, `HARNESS_API_KEY`.
+
+### API keys
+
+If a key is missing and the run is interactive, the harness asks for it:
+
+```text
+No API key found for opencode
+Get a key at https://opencode.ai/auth.
+Paste the API key (hidden):
+```
+
+The key is saved to `~/.config/harness/auth.json` (or
+`$XDG_CONFIG_HOME/harness/auth.json`) with `0600` permissions and reused on the
+next run. It is checked against the provider's model catalog before the session
+starts; a key the provider rejects is removed instead of being kept. Run
+`harness --login -p opencode` to force the prompt again, for example to rotate a
+key or retry after an invalid one. When stdin is not a terminal, the harness
+never prompts; it fails with the environment variable and config options
+instead.
+
+Keys can also come from the provider's environment variable, an `api_key` in
+`harness.json`, a custom `api_key_env`, or `HARNESS_API_KEY`.
 
 A complete example is in [`harness.example.json`](harness.example.json).
 
@@ -267,6 +307,8 @@ harness [OPTIONS] [PROMPT]...
       --max-steps <N>          model turns per user message (default 40)
       --dump-context           print prompt, tools, skills, and MCP as JSON
       --list-providers         list providers and exit
+      --list-models            fetch the provider's models and exit
+      --login                  ask for an API key, save it, verify it, and exit
   -q, --quiet                  hide the startup banner
       --no-color               disable color
 ```
@@ -289,6 +331,7 @@ Interactive commands:
 /help              show commands
 /new               clear the conversation
 /model [id]        show or change the model
+/models            fetch the provider's models and choose one
 /provider          show the current provider
 /system            how to change the system prompt
 /tools             list available tools
@@ -315,13 +358,16 @@ The test suite covers:
 - write/edit/glob/grep/shell behavior and workspace path confinement;
 - skill loading and visible todos;
 - stdio MCP tool discovery and calls;
-- HTTP MCP initialization, session headers, SSE responses, and calls.
+- HTTP MCP initialization, session headers, SSE responses, and calls;
+- provider model-list fetching and sorted output;
+- API-key storage permissions and preservation of other provider keys.
 
 To inspect exactly what the model will receive without spending tokens:
 
 ```bash
 harness --dump-context | jq '.system'
 harness --dump-context | jq '.tools[].name'
+harness --list-models
 ```
 
 For a live smoke test:

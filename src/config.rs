@@ -63,6 +63,8 @@ pub struct ProviderConfig {
     #[serde(rename = "type")]
     pub kind: Option<ProviderKind>,
     pub base_url: Option<String>,
+    /// Optional endpoint that lists models. Defaults to `<base_url>/models`.
+    pub models_url: Option<String>,
     pub api_key: Option<String>,
     pub api_key_env: Option<String>,
     pub model: Option<String>,
@@ -80,6 +82,7 @@ impl ProviderConfig {
             },
             kind: over.kind.or(self.kind),
             base_url: over.base_url.or(self.base_url),
+            models_url: over.models_url.or(self.models_url),
             api_key: over.api_key.or(self.api_key),
             api_key_env: over.api_key_env.or(self.api_key_env),
             model: over.model.or(self.model),
@@ -317,35 +320,151 @@ pub fn expand_tilde(path: impl AsRef<Path>) -> PathBuf {
     path.to_path_buf()
 }
 
-pub fn resolve_api_key(name: &str, cfg: &ProviderConfig) -> Result<String> {
+pub fn resolve_api_key(name: &str, cfg: &ProviderConfig, interactive: bool) -> Result<String> {
+    if let Some(key) = find_api_key(name, cfg) {
+        return Ok(key);
+    }
+    if cfg.api_key.is_none()
+        && cfg.api_key_env.is_none()
+        && let Some(base) = &cfg.base_url
+        && (base.contains("localhost") || base.contains("127.0.0.1"))
+    {
+        return Ok("local".to_string());
+    }
+    if interactive {
+        return prompt_and_store_key(name, interactive);
+    }
+    let env_name = cfg.api_key_env.as_deref().unwrap_or("HARNESS_API_KEY");
+    bail!(
+        "missing API key for provider '{name}'. Set {env_name}, add \"api_key\" to harness.json, or run `harness --login -p {name}`."
+    )
+}
+
+pub fn find_api_key(name: &str, cfg: &ProviderConfig) -> Option<String> {
     if let Ok(key) = std::env::var("HARNESS_API_KEY")
         && !key.is_empty()
     {
-        return Ok(key);
+        return Some(key);
     }
     if let Some(key) = &cfg.api_key
         && !key.is_empty()
     {
-        return Ok(key.clone());
+        return Some(key.clone());
     }
     if let Some(var) = &cfg.api_key_env
         && let Ok(key) = std::env::var(var)
         && !key.is_empty()
     {
-        return Ok(key);
+        return Some(key);
     }
-    if let Some(key) = key_from_opencode_auth(name) {
-        return Ok(key);
+    if let Some(key) = stored_api_key(name) {
+        return Some(key);
     }
-    if let Some(base) = &cfg.base_url
-        && (base.contains("localhost") || base.contains("127.0.0.1"))
+    if matches!(name, "opencode" | "zen" | "opencode-zen")
+        && let Some(key) = key_from_opencode_auth(name)
     {
-        return Ok("local".to_string());
+        return Some(key);
     }
-    let env_name = cfg.api_key_env.as_deref().unwrap_or("HARNESS_API_KEY");
-    bail!(
-        "missing API key for provider '{name}'. Set {env_name} or add \"api_key\" to harness.json."
-    )
+    None
+}
+
+pub fn prompt_and_store_key(name: &str, interactive: bool) -> Result<String> {
+    if !interactive {
+        bail!("no terminal available to ask for an API key");
+    }
+    let hint = match name {
+        "opencode" => "Get a key at https://opencode.ai/auth.",
+        "openai" | "codex" => "Get a key at https://platform.openai.com/api-keys.",
+        "anthropic" => "Get a key at https://console.anthropic.com/settings/keys.",
+        "openrouter" => "Get a key at https://openrouter.ai/keys.",
+        _ => "Check your provider's dashboard for an API key.",
+    };
+    eprintln!();
+    eprintln!(
+        "{} {}",
+        crate::ui::yellow("No API key found for"),
+        crate::ui::bold(name)
+    );
+    eprintln!("{hint}");
+    let key = crate::ui::prompt_secret("Paste the API key (hidden): ")?;
+    let key = key.trim().to_string();
+    if key.is_empty() {
+        bail!("no API key entered");
+    }
+    match store_api_key(name, &key) {
+        Ok(path) => crate::ui::info(&format!("saved key to {}", path.display())),
+        Err(error) => crate::ui::warn(&format!("could not save the key: {error:#}")),
+    }
+    Ok(key)
+}
+
+pub fn auth_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|dir| dir.join("harness").join("auth.json"))
+}
+
+pub fn stored_api_key(provider: &str) -> Option<String> {
+    let path = auth_path()?;
+    let text = std::fs::read_to_string(path).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+    value.get(provider).and_then(find_key)
+}
+
+pub fn store_api_key(provider: &str, key: &str) -> Result<PathBuf> {
+    let path = auth_path().context("could not determine a config directory")?;
+    write_auth_key(&path, provider, key)?;
+    Ok(path)
+}
+
+fn write_auth_key(path: &Path, provider: &str, key: &str) -> Result<()> {
+    let mut value = read_auth_value(path);
+    value[provider] = serde_json::json!({"type": "api", "key": key});
+    write_private_json(path, &value)
+}
+
+pub fn remove_api_key(provider: &str) -> Result<()> {
+    let Some(path) = auth_path() else {
+        return Ok(());
+    };
+    if !path.is_file() {
+        return Ok(());
+    }
+    let mut value = read_auth_value(&path);
+    if let Some(map) = value.as_object_mut() {
+        map.remove(provider);
+    }
+    write_private_json(&path, &value)
+}
+
+fn read_auth_value(path: &Path) -> serde_json::Value {
+    let value = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if value.is_object() {
+        value
+    } else {
+        serde_json::json!({})
+    }
+}
+
+fn write_private_json(path: &Path, value: &serde_json::Value) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+    let temp = path.with_extension(format!("tmp.{}", std::process::id()));
+    std::fs::write(&temp, serde_json::to_string_pretty(value)?)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::rename(&temp, path)?;
+    Ok(())
 }
 
 fn key_from_opencode_auth(provider: &str) -> Option<String> {
@@ -397,13 +516,17 @@ fn find_key(value: &serde_json::Value) -> Option<String> {
 
 pub fn provider_presets() -> Vec<ProviderConfig> {
     vec![
-        preset(
-            "opencode",
-            ProviderKind::OpenAi,
-            "https://opencode.ai/inference/openai/v1",
-            "OPENCODE_API_KEY",
-            "deepseek-v4.1-flash",
-        ),
+        {
+            let mut opencode = preset(
+                "opencode",
+                ProviderKind::OpenAi,
+                "https://opencode.ai/inference/openai/v1",
+                "OPENCODE_API_KEY",
+                "deepseek-v4.1-flash",
+            );
+            opencode.models_url = Some("https://opencode.ai/inference/v1/models".to_string());
+            opencode
+        },
         preset(
             "openai",
             ProviderKind::Responses,
@@ -464,14 +587,14 @@ pub fn provider_presets() -> Vec<ProviderConfig> {
             "ollama",
             ProviderKind::OpenAi,
             "http://localhost:11434/v1",
-            "OLLAMA_API_KEY",
+            "",
             "qwen3-coder",
         ),
         preset(
             "lmstudio",
             ProviderKind::OpenAi,
             "http://localhost:1234/v1",
-            "LMSTUDIO_API_KEY",
+            "",
             "local-model",
         ),
     ]
@@ -488,8 +611,13 @@ fn preset(
         name: name.to_string(),
         kind: Some(kind),
         base_url: Some(base_url.to_string()),
+        models_url: None,
         api_key: None,
-        api_key_env: Some(api_key_env.to_string()),
+        api_key_env: if api_key_env.is_empty() {
+            None
+        } else {
+            Some(api_key_env.to_string())
+        },
         model: Some(model.to_string()),
         max_tokens: None,
         headers: BTreeMap::new(),
@@ -513,6 +641,24 @@ mod tests {
         let p = &merged.providers["opencode"];
         assert_eq!(p.model.as_deref(), Some("b"));
         assert_eq!(p.max_tokens, Some(123));
+    }
+
+    #[test]
+    fn auth_file_is_private_and_preserves_other_providers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("harness/auth.json");
+        write_auth_key(&path, "opencode", "one").unwrap();
+        write_auth_key(&path, "openai", "two").unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["opencode"]["key"], "one");
+        assert_eq!(value["openai"]["key"], "two");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
     }
 
     #[test]

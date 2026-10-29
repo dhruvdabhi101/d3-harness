@@ -38,6 +38,10 @@ Run the binary from source with `cargo run -- <args>` or
 - File tools must stay inside the workspace and reject path escapes.
 - Shell commands default to asking. Never silently approve a command just
   because stdin is not a terminal.
+- API keys belong in `~/.config/harness/auth.json`, never in committed files.
+  Key prompts must hide input and must not run when stdin is not a terminal.
+- Model lists come from the provider catalog. OpenCode keeps its model list at
+  `/inference/v1/models`, not under the Chat Completions base path.
 - Update README.md and harness.example.json when configuration or CLI behavior
   changes.
 - Add or update an integration test for behavior that crosses the model, tool,

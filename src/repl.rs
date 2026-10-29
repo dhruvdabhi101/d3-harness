@@ -53,6 +53,59 @@ async fn command(agent: &mut Agent, input: &str) -> Result<bool> {
                 ui::info(&format!("model: {argument}"));
             }
         }
+        "/models" => {
+            let models = agent.list_models().await?;
+            if models.is_empty() {
+                ui::warn("the provider returned no models");
+                return Ok(false);
+            }
+            if !argument.is_empty() {
+                if models.iter().any(|model| model.id == argument) {
+                    agent.set_model(argument.to_string());
+                    ui::info(&format!("model: {argument}"));
+                } else {
+                    ui::warn(&format!(
+                        "'{argument}' is not in the provider's list; run /models to pick one"
+                    ));
+                }
+                return Ok(false);
+            }
+            for (index, model) in models.iter().enumerate() {
+                let marker = if model.id == agent.model() { "*" } else { " " };
+                let name = model.name.as_deref().unwrap_or("");
+                let suffix = if name.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", ui::dim(name))
+                };
+                eprintln!("{marker} {:>3}. {:<34}{suffix}", index + 1, model.id);
+            }
+            let Some(choice) = ui::read_line("select model [number or id, empty to cancel]: ")?
+            else {
+                return Ok(false);
+            };
+            let choice = choice.trim();
+            if choice.is_empty() {
+                ui::info("model unchanged");
+                return Ok(false);
+            }
+            let selected = if let Ok(index) = choice.parse::<usize>() {
+                models
+                    .get(index.saturating_sub(1))
+                    .map(|model| model.id.clone())
+            } else if models.iter().any(|model| model.id == choice) {
+                Some(choice.to_string())
+            } else {
+                None
+            };
+            match selected {
+                Some(model) => {
+                    agent.set_model(model.clone());
+                    ui::info(&format!("model: {model}"));
+                }
+                None => ui::warn("that is not one of the listed models"),
+            }
+        }
         "/provider" => {
             ui::info(&format!(
                 "provider: {}. To switch providers, restart with --provider <name>.",
@@ -139,6 +192,7 @@ fn help() -> String {
         "/help              show this help",
         "/new               clear the conversation",
         "/model [id]        show or change the model",
+        "/models            fetch models and choose one",
         "/provider          show the current provider",
         "/system            how to change the system prompt",
         "/tools             list available tools",

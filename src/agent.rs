@@ -44,8 +44,15 @@ impl Agent {
     }
 
     pub fn set_model(&mut self, model: String) {
+        let old = format!("- Model: {}/{}\n", self.provider.name, self.model);
+        let new = format!("- Model: {}/{}\n", self.provider.name, model);
+        self.system = self.system.replace(&old, &new);
         self.provider.set_model(model.clone());
         self.model = model;
+    }
+
+    pub async fn list_models(&self) -> Result<Vec<crate::provider::ModelInfo>> {
+        self.provider.list_models().await
     }
 
     pub fn clear(&mut self) {

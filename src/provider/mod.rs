@@ -17,6 +17,12 @@ pub struct ToolDefinition {
     pub schema: Value,
 }
 
+#[derive(Debug, Clone)]
+pub struct ModelInfo {
+    pub id: String,
+    pub name: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Usage {
     pub input_tokens: u64,
@@ -69,6 +75,35 @@ impl Provider {
 
     pub fn set_model(&mut self, model: String) {
         self.model = model;
+    }
+
+    pub async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        let url = self
+            .config
+            .models_url
+            .clone()
+            .unwrap_or_else(|| self.endpoint("/models"));
+        let mut request = self.client.get(&url);
+        for (key, value) in &self.config.headers {
+            request = request.header(key, value);
+        }
+        request = match self.config.kind.unwrap_or_default() {
+            ProviderKind::Anthropic => request
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01"),
+            _ => request.bearer_auth(&self.api_key),
+        };
+        let response = request.send().await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            bail!(
+                "could not list models ({status}): {}",
+                truncate(&body, 1000)
+            );
+        }
+        let value: Value = response.json().await.context("parsing model list")?;
+        Ok(parse_models(&value))
     }
 
     pub async fn complete<F: FnMut(&str)>(
@@ -204,10 +239,60 @@ pub(super) fn truncate(text: &str, max: usize) -> String {
     format!("{cut}\n… truncated")
 }
 
+pub(super) fn parse_models(value: &Value) -> Vec<ModelInfo> {
+    let items = value
+        .get("data")
+        .or_else(|| value.get("models"))
+        .and_then(Value::as_array)
+        .or_else(|| value.as_array());
+    let Some(items) = items else {
+        return Vec::new();
+    };
+    let mut models = items
+        .iter()
+        .filter_map(|item| {
+            let id = item
+                .get("id")
+                .or_else(|| item.get("name"))
+                .and_then(Value::as_str)?
+                .to_string();
+            let name = item
+                .get("display_name")
+                .or_else(|| item.get("name"))
+                .and_then(Value::as_str)
+                .filter(|name| *name != id)
+                .map(str::to_string);
+            Some(ModelInfo { id, name })
+        })
+        .collect::<Vec<_>>();
+    models.sort_by(|a, b| a.id.cmp(&b.id));
+    models.dedup_by(|a, b| a.id == b.id);
+    models
+}
+
 pub(super) fn parse_args(raw: &str) -> String {
     if raw.trim().is_empty() {
         "{}".to_string()
     } else {
         raw.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parses_openai_and_anthropic_model_lists() {
+        let openai = json!({"object":"list","data":[{"id":"b"},{"id":"a"}]});
+        let models = parse_models(&openai);
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "a");
+
+        let anthropic = json!({"data":[{"id":"claude-x","display_name":"Claude X"}]});
+        let models = parse_models(&anthropic);
+        assert_eq!(models[0].id, "claude-x");
+        assert_eq!(models[0].name.as_deref(), Some("Claude X"));
     }
 }

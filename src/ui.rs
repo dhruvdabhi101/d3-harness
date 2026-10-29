@@ -141,6 +141,14 @@ pub fn confirm(question: &str) -> bool {
     matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
+pub fn prompt_secret(prompt: &str) -> io::Result<String> {
+    eprint!("{prompt}");
+    io::stderr().flush()?;
+    let value = rpassword::read_password().map_err(io::Error::other)?;
+    eprintln!();
+    Ok(value)
+}
+
 pub fn read_line(prompt: &str) -> io::Result<Option<String>> {
     eprint!("{prompt}");
     io::stderr().flush()?;

@@ -61,6 +61,63 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
         .clone()
         .or_else(|| provider_cfg.model.clone())
         .unwrap_or_else(|| "deepseek-v4.1-flash".to_string());
+    let interactive = std::io::stdin().is_terminal();
+
+    if cli.login {
+        let key = config::prompt_and_store_key(&provider_name, interactive)?;
+        let provider = Provider::new(
+            provider_name.clone(),
+            provider_cfg.clone(),
+            model.clone(),
+            key,
+        )?;
+        match provider.list_models().await {
+            Ok(models) => ui::info(&format!(
+                "key verified; {} models are available",
+                models.len()
+            )),
+            Err(error) => {
+                let message = format!("{error:#}");
+                if message.contains("401") || message.contains("403") {
+                    let _ = config::remove_api_key(&provider_name);
+                    anyhow::bail!(
+                        "the provider rejected that API key, so it was not kept. Run `harness --login -p {provider_name}` to try again."
+                    );
+                }
+                ui::warn(&format!(
+                    "key saved, but the model list could not be verified: {message}"
+                ));
+            }
+        }
+        return Ok(());
+    }
+
+    if cli.list_models {
+        let had_key = config::find_api_key(&provider_name, &provider_cfg).is_some();
+        let api_key = config::resolve_api_key(&provider_name, &provider_cfg, interactive)?;
+        let provider = Provider::new(
+            provider_name.clone(),
+            provider_cfg.clone(),
+            model.clone(),
+            api_key,
+        )?;
+        let models = match provider.list_models().await {
+            Ok(models) => models,
+            Err(error) => {
+                let message = format!("{error:#}");
+                if !had_key && (message.contains("401") || message.contains("403")) {
+                    let _ = config::remove_api_key(&provider_name);
+                    anyhow::bail!(
+                        "the provider rejected that API key, so it was not kept. Run `harness --login -p {provider_name}` to try again."
+                    );
+                }
+                return Err(error);
+            }
+        };
+        print_models(&models, &model);
+        return Ok(());
+    }
+
     let skills = skills::SkillSet::discover(&cwd, &cfg.skills.paths);
     let mcp = mcp::McpManager::connect(&cfg.mcp, &cwd).await;
     let tools = ToolRegistry::new(
@@ -69,7 +126,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
         mcp,
         cfg.permissions.clone(),
         cfg.auto_approve,
-        std::io::stdin().is_terminal(),
+        interactive,
     );
 
     let core = resolve_core_prompt(&cli, &cfg)?;
@@ -101,15 +158,29 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
-    let api_key = config::resolve_api_key(&provider_name, &provider_cfg)?;
+    let had_key = config::find_api_key(&provider_name, &provider_cfg).is_some();
+    let api_key = config::resolve_api_key(&provider_name, &provider_cfg, interactive)?;
     let provider = Provider::new(
         provider_name.clone(),
         provider_cfg.clone(),
         model.clone(),
         api_key,
     )?;
+    if !had_key && interactive {
+        match provider.list_models().await {
+            Ok(_) => ui::info("API key accepted"),
+            Err(error) => {
+                let message = format!("{error:#}");
+                if message.contains("401") || message.contains("403") {
+                    let _ = config::remove_api_key(&provider_name);
+                    anyhow::bail!(
+                        "the provider rejected the API key. Run `harness --login -p {provider_name}` to try again."
+                    );
+                }
+            }
+        }
+    }
 
-    let interactive = std::io::stdin().is_terminal();
     let prompt_text = prompt_from_args(&cli.prompt, interactive)?;
 
     if !cli.quiet {
@@ -223,6 +294,21 @@ pub fn parse_and_run() -> Result<()> {
     let cli = <Cli as clap::Parser>::parse();
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(run_cli(cli))
+}
+
+fn print_models(models: &[provider::ModelInfo], current: &str) {
+    if models.is_empty() {
+        println!("No models returned by the provider.");
+        return;
+    }
+    println!("{:<36} NAME", "MODEL ID");
+    for model in models {
+        let marker = if model.id == current { "*" } else { " " };
+        let name = model.name.as_deref().unwrap_or("");
+        println!("{marker} {:<34} {}", model.id, name);
+    }
+    println!();
+    println!("Current model is marked with *. Use -m <id> or /models to change it.");
 }
 
 fn kind_name(kind: ProviderKind) -> &'static str {

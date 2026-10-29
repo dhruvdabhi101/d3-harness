@@ -52,6 +52,14 @@ pub struct Cli {
     #[arg(long)]
     pub list_providers: bool,
 
+    /// Fetch the selected provider's models and print them, then exit.
+    #[arg(long)]
+    pub list_models: bool,
+
+    /// Ask for an API key, save it, verify it, and exit.
+    #[arg(long)]
+    pub login: bool,
+
     /// Hide the startup banner.
     #[arg(short = 'q', long)]
     pub quiet: bool,
