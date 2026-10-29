@@ -1,0 +1,29 @@
+{
+  "provider": "opencode",
+  "model": "deepseek-v4.1-flash",
+  "max_steps": 40,
+  "auto_approve": false,
+  "permissions": {
+    "shell": "ask",
+    "edit": "allow"
+  },
+  "skills": {
+    "paths": []
+  },
+  "instructions": [],
+  "providers": {},
+  "mcp": {
+    "servers": {
+      "filesystem": {
+        "type": "stdio",
+        "command": [
+          "npx",
+          "-y",
+          "@modelcontextprotocol/server-filesystem",
+          "."
+        ],
+        "enabled": false
+      }
+    }
+  }
+}

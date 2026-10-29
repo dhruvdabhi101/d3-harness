@@ -1,0 +1,32 @@
+[package]
+name = "oc-harness"
+version = "0.1.0"
+edition = "2024"
+description = "A small, honest CLI coding harness"
+license = "MIT"
+
+[[bin]]
+name = "harness"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+dirs = "7"
+futures-util = "0.3"
+globset = "0.4"
+ignore = "0.4"
+regex = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+similar = "3"
+tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+axum = "0.8"
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+strip = true
