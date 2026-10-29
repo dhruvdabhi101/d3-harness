@@ -124,6 +124,15 @@ Keybindings:
 | `o` in ChatGPT sign-in | open the verification URL in your browser |
 | `y` / `n` on approval | allow / deny the command |
 
+The TUI is built on maintained crates:
+
+- [`ratatui`](https://ratatui.rs) for the layout, lists, scrollbar, and widgets.
+- [`tui-textarea-2`](https://crates.io/crates/tui-textarea-2) for the message editor,
+  cursor movement, undo, word movement, and bracketed paste.
+- [`tui-markdown`](https://crates.io/crates/tui-markdown) for headings, lists,
+  tables, inline code, and syntax-highlighted code blocks.
+- `crossterm` for the terminal backend.
+
 The plain line-based REPL is still available with `--no-tui`.
 
 ## What it does

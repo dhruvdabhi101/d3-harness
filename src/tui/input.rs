@@ -6,6 +6,7 @@ pub struct InputBuffer {
     cursor: usize,
 }
 
+#[allow(dead_code)]
 impl InputBuffer {
     pub fn new() -> Self {
         Self::default()

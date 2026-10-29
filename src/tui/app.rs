@@ -8,11 +8,15 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Clear, Paragraph, Wrap},
+    widgets::{
+        Block, BorderType, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Wrap,
+    },
 };
 use similar::TextDiff;
 use std::path::PathBuf;
 use tokio::sync::{mpsc, oneshot};
+use tui_textarea::TextArea;
 
 const ACCENT: Color = Color::Rgb(255, 153, 102);
 const ACCENT_DIM: Color = Color::Rgb(160, 100, 70);
@@ -22,9 +26,9 @@ const RED: Color = Color::Rgb(240, 120, 120);
 const YELLOW: Color = Color::Rgb(240, 200, 120);
 const DIM: Color = Color::Rgb(135, 135, 145);
 const FAINT: Color = Color::Rgb(80, 80, 90);
-const CODE_BG: Color = Color::Rgb(36, 36, 42);
 const USER_BG: Color = Color::Rgb(35, 43, 56);
 const ASSISTANT_BG: Color = Color::Rgb(26, 29, 35);
+const CODE_BG: Color = Color::Rgb(36, 38, 46);
 const APPROVAL_BG: Color = Color::Rgb(46, 37, 24);
 const LIGHT: Color = Color::Rgb(232, 234, 240);
 
@@ -52,7 +56,7 @@ pub struct App {
     info: TuiInfo,
     model: String,
     items: Vec<Item>,
-    input: InputBuffer,
+    input: TextArea<'static>,
     palette: Option<Palette>,
     modal: Option<Modal>,
     approval: Option<ApprovalPrompt>,
@@ -229,7 +233,7 @@ impl App {
             info,
             model,
             items: Vec::new(),
-            input: InputBuffer::new(),
+            input: TextArea::default(),
             palette: None,
             modal: None,
             approval: None,
@@ -278,7 +282,7 @@ impl App {
             return;
         }
 
-        let input_height = self.input.line_count().clamp(1, 6) as u16;
+        let input_height = self.input.lines().len().clamp(1, 6) as u16;
         let approval_height = self.approval.as_ref().map(approval_height).unwrap_or(0);
         let bottom_height = if approval_height > 0 {
             approval_height
@@ -402,6 +406,24 @@ impl App {
         }
         let paragraph = paragraph.scroll((self.scroll, 0));
         frame.render_widget(paragraph, inner);
+
+        if total > inner.height as usize && area.width > 6 {
+            let bar_area = Rect {
+                x: area.x + area.width.saturating_sub(2),
+                y: inner.y,
+                width: 1,
+                height: inner.height,
+            };
+            let mut state = ScrollbarState::new(total)
+                .position(self.scroll as usize)
+                .viewport_content_length(inner.height as usize);
+            let bar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .thumb_symbol("┃")
+                .track_symbol(Some("│"))
+                .style(Style::default().fg(FAINT))
+                .thumb_style(Style::default().fg(ACCENT_DIM));
+            frame.render_stateful_widget(bar, bar_area, &mut state);
+        }
     }
 
     fn draw_sidebar(&self, frame: &mut Frame, area: Rect) {
@@ -544,7 +566,7 @@ impl App {
         );
     }
 
-    fn draw_input(&self, frame: &mut Frame, area: Rect, hint_area: Rect, input_height: u16) {
+    fn draw_input(&mut self, frame: &mut Frame, area: Rect, hint_area: Rect, _input_height: u16) {
         let focused = !self.busy && self.modal.is_none() && self.approval.is_none();
         let border = if focused { ACCENT } else { ACCENT_DIM };
         let title = if self.busy {
@@ -559,44 +581,17 @@ impl App {
                 title,
                 Style::default().fg(if focused { ACCENT } else { DIM }),
             )));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-
-        let lines = self.input.lines();
-        let (cursor_row, cursor_col) = self.input.line_col();
-        let start = if cursor_row >= input_height as usize {
-            cursor_row + 1 - input_height as usize
+        self.input.set_block(block);
+        self.input.set_style(Style::default().fg(LIGHT));
+        self.input
+            .set_cursor_style(Style::default().fg(Color::Rgb(20, 20, 24)).bg(ACCENT));
+        self.input.set_placeholder_text(if self.busy {
+            "Waiting for the current turn…"
         } else {
-            0
-        };
-        let visible = lines
-            .iter()
-            .skip(start)
-            .take(input_height as usize)
-            .cloned()
-            .collect::<Vec<_>>();
-        let text = if self.input.is_empty() && !self.busy {
-            Text::from(Line::from(Span::styled(
-                "Ask anything, or type / for commands",
-                Style::default().fg(FAINT),
-            )))
-        } else {
-            Text::from(
-                visible
-                    .into_iter()
-                    .map(|line| Line::from(Span::raw(line)))
-                    .collect::<Vec<_>>(),
-            )
-        };
-        frame.render_widget(Paragraph::new(text), inner);
-
-        if focused && self.modal.is_none() {
-            let x = inner.x + cursor_col.min(inner.width.saturating_sub(1) as usize) as u16;
-            let y = inner.y + (cursor_row - start) as u16;
-            if y < inner.y + inner.height {
-                frame.set_cursor_position((x, y));
-            }
-        }
+            "Ask anything, or type / for commands"
+        });
+        self.input.set_placeholder_style(Style::default().fg(FAINT));
+        frame.render_widget(&self.input, area);
 
         let left = if self.busy {
             format!(
@@ -648,33 +643,28 @@ impl App {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let start = if palette.selected >= visible {
-            palette.selected + 1 - visible
-        } else {
-            0
-        };
-        let mut lines = Vec::new();
-        for (index, item) in palette.items.iter().enumerate().skip(start).take(visible) {
-            let selected = index == palette.selected;
-            let base = if selected {
+        let items = palette
+            .items
+            .iter()
+            .map(|item| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("  {:<20} ", item.label), Style::default().fg(LIGHT)),
+                    Span::styled(truncate(&item.description, 46), Style::default().fg(DIM)),
+                ]))
+            })
+            .collect::<Vec<_>>();
+        let list = List::new(items)
+            .highlight_style(
                 Style::default()
                     .fg(Color::Rgb(20, 20, 24))
                     .bg(ACCENT)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            let desc = if selected {
-                base
-            } else {
-                Style::default().fg(DIM)
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {:<18} ", item.label), base),
-                Span::styled(truncate(&item.description, 48), desc),
-            ]));
-        }
-        frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("› ");
+        let mut state = ListState::default()
+            .with_selected(Some(palette.selected))
+            .with_offset(palette.selected.saturating_sub(visible.saturating_sub(1)));
+        frame.render_stateful_widget(list, inner, &mut state);
     }
 
     fn draw_modal(&self, frame: &mut Frame, modal: &Modal, area: Rect) {
@@ -973,14 +963,15 @@ impl App {
 
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
-                KeyCode::Char('a') => self.input.home(),
-                KeyCode::Char('e') => self.input.end(),
+                KeyCode::Char('a') | KeyCode::Char('e') => {
+                    self.input.input(key);
+                }
                 KeyCode::Char('u') => {
                     self.input.clear();
                     self.refresh_palette();
                 }
                 KeyCode::Char('w') => {
-                    self.input.delete_word();
+                    self.input.input(key);
                     self.refresh_palette();
                 }
                 KeyCode::Char('b') => self.show_sidebar = !self.show_sidebar,
@@ -993,7 +984,9 @@ impl App {
                 KeyCode::Down => self.scroll_down(4),
                 KeyCode::Home => self.scroll = 0,
                 KeyCode::End => self.scroll_to_bottom(),
-                KeyCode::Char('j') => self.input.insert_char('\n'),
+                KeyCode::Char('j') => {
+                    self.input.insert_str("\n");
+                }
                 _ => {}
             }
             return;
@@ -1004,38 +997,35 @@ impl App {
                 if key.modifiers.contains(KeyModifiers::SHIFT)
                     || key.modifiers.contains(KeyModifiers::ALT) =>
             {
-                self.input.insert_char('\n');
+                self.input.insert_str("\n");
             }
             KeyCode::Enter => self.submit(),
             KeyCode::Tab => {
-                if self.input.text().starts_with('/') {
+                if self.input_text().starts_with('/') {
                     self.open_command_palette();
                 } else {
                     self.input.insert_str("    ");
                 }
             }
-            KeyCode::Backspace => {
-                self.input.backspace();
+            KeyCode::Backspace | KeyCode::Delete => {
+                self.input.input(key);
                 self.refresh_palette();
             }
-            KeyCode::Delete => {
-                self.input.delete();
-                self.refresh_palette();
+            KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End => {
+                self.input.input(key);
             }
-            KeyCode::Left => self.input.left(),
-            KeyCode::Right => self.input.right(),
-            KeyCode::Home => self.input.home(),
-            KeyCode::End => self.input.end(),
             KeyCode::Up => {
-                if self.input.up() {
-                } else {
+                if self.input.lines().len() <= 1 && !self.history.is_empty() {
                     self.history_prev();
+                } else {
+                    self.input.input(key);
                 }
             }
             KeyCode::Down => {
-                if self.input.down() {
-                } else {
+                if self.history_pos.is_some() {
                     self.history_next();
+                } else {
+                    self.input.input(key);
                 }
             }
             KeyCode::PageUp => self.scroll_up(12),
@@ -1047,7 +1037,7 @@ impl App {
             }
             KeyCode::Char(ch) => {
                 let was_empty = self.input.is_empty();
-                self.input.insert_char(ch);
+                self.input.input(key);
                 if was_empty && ch == '/' {
                     self.open_command_palette();
                 } else {
@@ -1100,16 +1090,16 @@ impl App {
                 }
             }
             KeyCode::Backspace => {
-                self.input.backspace();
-                if self.input.text().starts_with('/') && !self.input.text().contains(' ') {
+                self.input.input(key);
+                if self.input_text().starts_with('/') && !self.input_text().contains(' ') {
                     self.refresh_palette();
                 } else {
                     self.palette = None;
                 }
             }
-            KeyCode::Char(ch) => {
-                self.input.insert_char(ch);
-                if self.input.text().starts_with('/') && !self.input.text().contains(' ') {
+            KeyCode::Char(_) => {
+                self.input.input(key);
+                if self.input_text().starts_with('/') && !self.input_text().contains(' ') {
                     self.refresh_palette();
                 } else {
                     self.palette = None;
@@ -1283,7 +1273,7 @@ impl App {
     }
 
     fn submit(&mut self) {
-        let text = self.input.text().trim().to_string();
+        let text = self.input_text().trim().to_string();
         if text.is_empty() {
             return;
         }
@@ -1424,6 +1414,15 @@ impl App {
         self.push_info(format!("model: {model}"));
     }
 
+    fn input_text(&self) -> String {
+        self.input.lines().join("\n")
+    }
+
+    fn set_input_text(&mut self, text: impl AsRef<str>) {
+        self.input.clear();
+        self.input.insert_str(text.as_ref());
+    }
+
     fn open_provider_palette(&mut self) {
         self.palette = Some(Palette {
             kind: PaletteKind::Providers,
@@ -1562,13 +1561,13 @@ impl App {
     }
 
     fn refresh_palette(&mut self) {
+        let text = self.input_text();
         let Some(palette) = &mut self.palette else {
             return;
         };
         if palette.kind != PaletteKind::Commands {
             return;
         }
-        let text = self.input.text();
         if !text.starts_with('/') || text.contains(' ') {
             self.palette = None;
             return;
@@ -1795,7 +1794,7 @@ impl App {
             None => self.history.len() - 1,
         };
         self.history_pos = Some(index);
-        self.input.set_text(self.history[index].clone());
+        self.set_input_text(self.history[index].clone());
     }
 
     fn history_next(&mut self) {
@@ -1805,7 +1804,7 @@ impl App {
         if index + 1 < self.history.len() {
             let next = index + 1;
             self.history_pos = Some(next);
-            self.input.set_text(self.history[next].clone());
+            self.set_input_text(self.history[next].clone());
         } else {
             self.history_pos = None;
             self.input.clear();
@@ -1846,56 +1845,42 @@ fn provider_key(choice: &ProviderChoice) -> Option<String> {
 }
 
 fn assistant_lines(text: &str, streaming: bool, frame_index: usize) -> Vec<Line<'static>> {
+    let rendered = tui_markdown::from_str(text);
     let mut lines = Vec::new();
-    let mut code = false;
-    let mut first = true;
-    let base = Style::default().fg(LIGHT).bg(ASSISTANT_BG);
-    for raw in text.lines() {
-        let clean = raw.trim_end();
-        if clean.trim_start().starts_with("```") {
-            code = !code;
+    let mut in_code = false;
+    for (index, mut line) in rendered.lines.into_iter().enumerate() {
+        let plain = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        if plain.trim_start().starts_with("```") {
+            in_code = !in_code;
             continue;
         }
-        let prefix = if first { " ◆ " } else { "   " };
-        first = false;
-        let prefix_span = Span::styled(prefix, Style::default().fg(ACCENT).bg(ASSISTANT_BG));
-        if code {
-            lines.push(Line::from(vec![
-                prefix_span,
-                Span::styled(
-                    format!(" {clean} "),
-                    Style::default().fg(Color::Rgb(190, 210, 230)).bg(CODE_BG),
-                ),
-            ]));
-            continue;
+        if let Some(first) = line.spans.first() {
+            let marker = first.content.as_ref();
+            if marker.contains('#') && marker.chars().all(|ch| ch == '#' || ch == ' ') {
+                line.spans.remove(0);
+            } else if marker == "- " || marker == "* " {
+                line.spans[0] = Span::styled("• ", Style::default().fg(ACCENT));
+            } else if marker == ">" {
+                line.spans[0] = Span::styled("│ ", Style::default().fg(ACCENT));
+                if line.spans.get(1).is_some_and(|span| span.content == " ") {
+                    line.spans.remove(1);
+                }
+            }
         }
-        if let Some(heading) = clean.strip_prefix('#') {
-            lines.push(Line::from(vec![
-                prefix_span,
-                Span::styled(
-                    format!("{} ", heading.trim_start_matches('#').trim()),
-                    base.fg(ACCENT).add_modifier(Modifier::BOLD),
-                ),
-            ]));
-            continue;
-        }
-        if let Some(bullet) = clean
-            .strip_prefix("- ")
-            .or_else(|| clean.strip_prefix("* "))
-        {
-            let mut spans = vec![
-                prefix_span,
-                Span::styled("• ", Style::default().fg(ACCENT).bg(ASSISTANT_BG)),
-            ];
-            spans.extend(inline_spans(bullet, base));
-            spans.push(Span::styled(" ", Style::default().bg(ASSISTANT_BG)));
-            lines.push(Line::from(spans));
-            continue;
-        }
-        let mut spans = vec![prefix_span];
-        spans.extend(inline_spans(clean, base));
-        spans.push(Span::styled(" ", Style::default().bg(ASSISTANT_BG)));
-        lines.push(Line::from(spans));
+        let prefix = if index == 0 { " ◆ " } else { "   " };
+        let mut spans = vec![Span::styled(prefix, Style::default().fg(ACCENT))];
+        spans.extend(
+            line.spans
+                .into_iter()
+                .map(|span| Span::styled(span.content.into_owned(), span.style)),
+        );
+        spans.push(Span::styled(" ", Style::default()));
+        let background = if in_code { CODE_BG } else { ASSISTANT_BG };
+        lines.push(Line::from(spans).style(Style::default().fg(LIGHT).bg(background)));
     }
     if streaming {
         lines.push(Line::from(Span::styled(
@@ -1904,31 +1889,6 @@ fn assistant_lines(text: &str, streaming: bool, frame_index: usize) -> Vec<Line<
         )));
     }
     lines
-}
-
-fn inline_spans(text: &str, base: Style) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find('`') {
-        if start > 0 {
-            spans.push(Span::styled(rest[..start].to_string(), base));
-        }
-        let after = &rest[start + 1..];
-        if let Some(end) = after.find('`') {
-            spans.push(Span::styled(
-                after[..end].to_string(),
-                base.fg(Color::Rgb(150, 205, 255)).bg(CODE_BG),
-            ));
-            rest = &after[end + 1..];
-        } else {
-            spans.push(Span::styled(rest[start..].to_string(), base));
-            return spans;
-        }
-    }
-    if !rest.is_empty() {
-        spans.push(Span::styled(rest.to_string(), base));
-    }
-    spans
 }
 
 fn diff_lines(path: &str, old: &str, new: &str) -> Vec<Line<'static>> {
@@ -2066,9 +2026,8 @@ mod tests {
     fn slash_opens_and_filters_the_command_palette() {
         let (mut app, _rx) = app();
         key(&mut app, KeyCode::Char('/'));
-        eprintln!("input after slash: {:?}", app.input.text());
         let screen = text(&mut app);
-        assert!(screen.contains("commands"), "{screen}");
+        assert!(screen.contains("fetch and choose"), "{screen}");
         assert!(screen.contains("/models"), "{screen}");
         key(&mut app, KeyCode::Char('m'));
         key(&mut app, KeyCode::Char('o'));
@@ -2078,6 +2037,22 @@ mod tests {
         key(&mut app, KeyCode::Esc);
         let screen = text(&mut app);
         assert!(!screen.contains("fetch and choose"), "{screen}");
+    }
+
+    #[test]
+    fn markdown_answers_render_headings_lists_and_code() {
+        let lines = assistant_lines("# Heading\n- item one\n```rust\nlet x = 1;\n```", false, 0);
+        let text = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("Heading"), "{text}");
+        assert!(text.contains("item one"), "{text}");
+        assert!(text.contains("let x = 1;"), "{text}");
+        assert!(!text.contains("##"), "{text}");
+        assert!(!text.contains("```"), "{text}");
+        assert!(text.contains("• item one"), "{text}");
     }
 
     #[test]

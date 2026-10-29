@@ -18,7 +18,9 @@ Run the binary from source with `cargo run -- <args>` or
 - `src/lib.rs` — startup, provider selection, context assembly, CLI dispatch.
 - `src/agent.rs` — the sequential model/tool loop.
 - `src/ui_bridge.rs` — `AgentUi` and `ToolUi` traits shared by the CLI and TUI.
-- `src/tui/` — ratatui interface, input editor, palette, modals, rendering.
+- `src/tui/` — ratatui interface. Uses `tui-textarea-2` for the message
+  editor, `tui-markdown` for assistant answers, and ratatui `List`/`Scrollbar`
+  widgets for the palette and scrollback.
 - `src/provider/` — OpenAI Chat Completions, Anthropic Messages, OpenAI Responses.
 - `src/tools/` — built-in tools and the tool registry.
 - `src/mcp/` — stdio and streamable-HTTP MCP clients.
