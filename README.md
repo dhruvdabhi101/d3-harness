@@ -91,12 +91,15 @@ The interactive mode is a real terminal application, not a line reader.
 Features:
 
 - Streamed assistant text with light markdown and code styling.
+- Distinct backgrounds for your prompt and the assistant's answer.
 - Tool calls as live rows with spinner, result summary, and color-coded diffs.
+- Approval bar docked at the bottom, not a centered dialog, with the command and
+  `[y] allow / [n] deny` in reach.
 - Slash-command palette that opens as soon as you type `/`.
 - Provider picker via `/provider`, with sign-in without leaving the TUI.
 - ChatGPT device-code sign-in via `/login`, including the URL and one-time code.
 - Live model picker via `/models`, fetched from the provider catalog.
-- Approval modal for shell commands, with the exact command shown.
+- Bottom approval bar for shell commands, with the exact command shown.
 - Question modal for `ask_user`, with options and free-form input.
 - Sidebar with session model, approval mode, plan/todos, message and token counts.
 - Scrollback with PageUp/PageDown, mouse wheel, and auto-follow that pauses when
@@ -119,6 +122,7 @@ Keybindings:
 | `Ctrl+D` | quit when the input is empty |
 | `Esc` | close palette/modal, deny approval, or clear input |
 | `o` in ChatGPT sign-in | open the verification URL in your browser |
+| `y` / `n` on approval | allow / deny the command |
 
 The plain line-based REPL is still available with `--no-tui`.
 

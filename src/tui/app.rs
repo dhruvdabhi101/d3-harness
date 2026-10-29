@@ -23,6 +23,10 @@ const YELLOW: Color = Color::Rgb(240, 200, 120);
 const DIM: Color = Color::Rgb(135, 135, 145);
 const FAINT: Color = Color::Rgb(80, 80, 90);
 const CODE_BG: Color = Color::Rgb(36, 36, 42);
+const USER_BG: Color = Color::Rgb(35, 43, 56);
+const ASSISTANT_BG: Color = Color::Rgb(26, 29, 35);
+const APPROVAL_BG: Color = Color::Rgb(46, 37, 24);
+const LIGHT: Color = Color::Rgb(232, 234, 240);
 
 #[derive(Clone)]
 pub struct ProviderChoice {
@@ -51,6 +55,7 @@ pub struct App {
     input: InputBuffer,
     palette: Option<Palette>,
     modal: Option<Modal>,
+    approval: Option<ApprovalPrompt>,
     history: Vec<String>,
     history_pos: Option<usize>,
     scroll: u16,
@@ -125,11 +130,6 @@ struct PaletteItem {
 }
 
 enum Modal {
-    Confirm {
-        title: String,
-        body: String,
-        response: Option<oneshot::Sender<bool>>,
-    },
     Ask {
         question: String,
         options: Vec<String>,
@@ -148,6 +148,12 @@ enum Modal {
         status: String,
         failed: bool,
     },
+}
+
+struct ApprovalPrompt {
+    title: String,
+    body: String,
+    response: Option<oneshot::Sender<bool>>,
 }
 
 struct CommandSpec {
@@ -226,6 +232,7 @@ impl App {
             input: InputBuffer::new(),
             palette: None,
             modal: None,
+            approval: None,
             history: Vec::new(),
             history_pos: None,
             scroll: 0,
@@ -272,10 +279,16 @@ impl App {
         }
 
         let input_height = self.input.line_count().clamp(1, 6) as u16;
+        let approval_height = self.approval.as_ref().map(approval_height).unwrap_or(0);
+        let bottom_height = if approval_height > 0 {
+            approval_height
+        } else {
+            input_height + 3
+        };
         let chunks = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(3),
-            Constraint::Length(input_height + 3),
+            Constraint::Length(bottom_height),
         ])
         .split(area);
 
@@ -293,13 +306,16 @@ impl App {
             self.draw_sidebar(frame, sidebar);
         }
 
-        let input_chunks =
-            Layout::vertical([Constraint::Length(input_height + 2), Constraint::Length(1)])
-                .split(chunks[2]);
-        self.draw_input(frame, input_chunks[0], input_chunks[1], input_height);
-
-        if let Some(palette) = &self.palette {
-            self.draw_palette(frame, palette, input_chunks[0]);
+        if let Some(approval) = &self.approval {
+            self.draw_approval(frame, approval, chunks[2]);
+        } else {
+            let input_chunks =
+                Layout::vertical([Constraint::Length(input_height + 2), Constraint::Length(1)])
+                    .split(chunks[2]);
+            self.draw_input(frame, input_chunks[0], input_chunks[1], input_height);
+            if let Some(palette) = &self.palette {
+                self.draw_palette(frame, palette, input_chunks[0]);
+            }
         }
         if let Some(modal) = &self.modal {
             self.draw_modal(frame, modal, area);
@@ -485,8 +501,51 @@ impl App {
         );
     }
 
+    fn draw_approval(&self, frame: &mut Frame, approval: &ApprovalPrompt, area: Rect) {
+        frame.render_widget(Clear, area);
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(ACCENT))
+            .title(Line::from(Span::styled(
+                " permission required ",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            )))
+            .style(Style::default().bg(APPROVAL_BG));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if inner.height == 0 {
+            return;
+        }
+        let mut lines = vec![Line::from(Span::styled(
+            approval.title.clone(),
+            Style::default()
+                .fg(LIGHT)
+                .bg(APPROVAL_BG)
+                .add_modifier(Modifier::BOLD),
+        ))];
+        if !approval.body.trim().is_empty() {
+            for line in approval.body.lines() {
+                lines.push(Line::from(Span::styled(
+                    format!("  {line}"),
+                    Style::default()
+                        .fg(Color::Rgb(220, 210, 190))
+                        .bg(APPROVAL_BG),
+                )));
+            }
+        }
+        lines.push(Line::from(vec![
+            Span::styled("  [y] allow", Style::default().fg(GREEN).bg(APPROVAL_BG)),
+            Span::styled("    [n] deny", Style::default().fg(RED).bg(APPROVAL_BG)),
+            Span::styled("    Esc deny", Style::default().fg(FAINT).bg(APPROVAL_BG)),
+        ]));
+        frame.render_widget(
+            Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
+            inner,
+        );
+    }
+
     fn draw_input(&self, frame: &mut Frame, area: Rect, hint_area: Rect, input_height: u16) {
-        let focused = !self.busy && self.modal.is_none();
+        let focused = !self.busy && self.modal.is_none() && self.approval.is_none();
         let border = if focused { ACCENT } else { ACCENT_DIM };
         let title = if self.busy {
             " message · working "
@@ -631,7 +690,6 @@ impl App {
         };
         frame.render_widget(Clear, rect);
         let title = match modal {
-            Modal::Confirm { title, .. } => title.as_str(),
             Modal::Ask { .. } => "question",
             Modal::ApiKey { .. } => "sign in",
             Modal::Login { .. } => "ChatGPT sign-in",
@@ -648,19 +706,6 @@ impl App {
 
         let mut lines = Vec::new();
         match modal {
-            Modal::Confirm { body, .. } => {
-                for line in body.lines() {
-                    lines.push(Line::from(Span::styled(
-                        line.to_string(),
-                        Style::default().fg(Color::Rgb(225, 225, 230)),
-                    )));
-                }
-                lines.push(Line::default());
-                lines.push(Line::from(Span::styled(
-                    "[y] allow · [n] deny · Esc deny",
-                    Style::default().fg(FAINT),
-                )));
-            }
             Modal::Ask {
                 question,
                 options,
@@ -787,10 +832,13 @@ impl App {
                         let prefix = if first { "› " } else { "  " };
                         first = false;
                         lines.push(Line::from(vec![
-                            Span::styled(prefix, Style::default().fg(ACCENT)),
                             Span::styled(
-                                line.to_string(),
-                                Style::default().fg(Color::Rgb(235, 235, 240)),
+                                format!(" {prefix}"),
+                                Style::default().fg(ACCENT).bg(USER_BG),
+                            ),
+                            Span::styled(
+                                format!("{line} "),
+                                Style::default().fg(LIGHT).bg(USER_BG),
                             ),
                         ]));
                     }
@@ -910,6 +958,10 @@ impl App {
         }
         self.ctrl_c_pending = false;
 
+        if self.approval.is_some() {
+            self.handle_approval_key(key);
+            return;
+        }
         if self.modal.is_some() {
             self.handle_modal_key(key);
             return;
@@ -1067,26 +1119,30 @@ impl App {
         }
     }
 
+    fn handle_approval_key(&mut self, key: KeyEvent) {
+        let Some(mut approval) = self.approval.take() else {
+            return;
+        };
+        let answer = match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Some(true),
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(false),
+            _ => None,
+        };
+        if let Some(answer) = answer {
+            if let Some(sender) = approval.response.take() {
+                let _ = sender.send(answer);
+            }
+            self.status = "working".to_string();
+        } else {
+            self.approval = Some(approval);
+        }
+    }
+
     fn handle_modal_key(&mut self, key: KeyEvent) {
         let Some(mut modal) = self.modal.take() else {
             return;
         };
         match &mut modal {
-            Modal::Confirm { response, .. } => {
-                let answer = match key.code {
-                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Some(true),
-                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(false),
-                    _ => None,
-                };
-                if let Some(answer) = answer {
-                    if let Some(sender) = response.take() {
-                        let _ = sender.send(answer);
-                    }
-                    self.status = "working".to_string();
-                } else {
-                    self.modal = Some(modal);
-                }
-            }
             Modal::Ask {
                 options,
                 selected,
@@ -1648,7 +1704,7 @@ impl App {
                 body,
                 respond,
             } => {
-                self.modal = Some(Modal::Confirm {
+                self.approval = Some(ApprovalPrompt {
                     title,
                     body,
                     response: Some(respond),
@@ -1757,6 +1813,10 @@ impl App {
     }
 }
 
+fn approval_height(prompt: &ApprovalPrompt) -> u16 {
+    (prompt.body.lines().count() as u16 + 5).clamp(6, 10)
+}
+
 fn open_browser(url: &str) {
     #[cfg(target_os = "macos")]
     let command = "open";
@@ -1789,19 +1849,21 @@ fn assistant_lines(text: &str, streaming: bool, frame_index: usize) -> Vec<Line<
     let mut lines = Vec::new();
     let mut code = false;
     let mut first = true;
+    let base = Style::default().fg(LIGHT).bg(ASSISTANT_BG);
     for raw in text.lines() {
         let clean = raw.trim_end();
         if clean.trim_start().starts_with("```") {
             code = !code;
             continue;
         }
-        let prefix = if first { "◆ " } else { "  " };
+        let prefix = if first { " ◆ " } else { "   " };
         first = false;
+        let prefix_span = Span::styled(prefix, Style::default().fg(ACCENT).bg(ASSISTANT_BG));
         if code {
             lines.push(Line::from(vec![
-                Span::styled(prefix, Style::default().fg(ACCENT)),
+                prefix_span,
                 Span::styled(
-                    format!(" {clean}"),
+                    format!(" {clean} "),
                     Style::default().fg(Color::Rgb(190, 210, 230)).bg(CODE_BG),
                 ),
             ]));
@@ -1809,10 +1871,10 @@ fn assistant_lines(text: &str, streaming: bool, frame_index: usize) -> Vec<Line<
         }
         if let Some(heading) = clean.strip_prefix('#') {
             lines.push(Line::from(vec![
-                Span::styled(prefix, Style::default().fg(ACCENT)),
+                prefix_span,
                 Span::styled(
-                    heading.trim_start_matches('#').trim().to_string(),
-                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                    format!("{} ", heading.trim_start_matches('#').trim()),
+                    base.fg(ACCENT).add_modifier(Modifier::BOLD),
                 ),
             ]));
             continue;
@@ -1822,21 +1884,23 @@ fn assistant_lines(text: &str, streaming: bool, frame_index: usize) -> Vec<Line<
             .or_else(|| clean.strip_prefix("* "))
         {
             let mut spans = vec![
-                Span::styled(prefix, Style::default().fg(ACCENT)),
-                Span::styled("• ", Style::default().fg(ACCENT)),
+                prefix_span,
+                Span::styled("• ", Style::default().fg(ACCENT).bg(ASSISTANT_BG)),
             ];
-            spans.extend(inline_spans(bullet, Style::default()));
+            spans.extend(inline_spans(bullet, base));
+            spans.push(Span::styled(" ", Style::default().bg(ASSISTANT_BG)));
             lines.push(Line::from(spans));
             continue;
         }
-        let mut spans = vec![Span::styled(prefix, Style::default().fg(ACCENT))];
-        spans.extend(inline_spans(clean, Style::default()));
+        let mut spans = vec![prefix_span];
+        spans.extend(inline_spans(clean, base));
+        spans.push(Span::styled(" ", Style::default().bg(ASSISTANT_BG)));
         lines.push(Line::from(spans));
     }
     if streaming {
         lines.push(Line::from(Span::styled(
-            format!("  {} ", spinner(frame_index)),
-            Style::default().fg(ACCENT),
+            format!("   {} ", spinner(frame_index)),
+            Style::default().fg(ACCENT).bg(ASSISTANT_BG),
         )));
     }
     lines
@@ -2080,8 +2144,11 @@ mod tests {
             respond: tx,
         });
         let screen = text(&mut app);
+        assert!(screen.contains("permission required"), "{screen}");
         assert!(screen.contains("run?"), "{screen}");
         assert!(screen.contains("allow"), "{screen}");
+        assert!(app.modal.is_none());
+        assert!(app.approval.is_some());
         key(&mut app, KeyCode::Char('y'));
         assert!(rx.try_recv().unwrap());
     }
