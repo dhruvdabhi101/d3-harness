@@ -12,25 +12,46 @@ The default system prompt is part of the product. It asks the agent to write
 code a careful human would review, to ask when ambiguity matters, to keep the
 user oriented, and to verify what it claims.
 
+## Install and update
+
+Install the latest GitHub release on Linux or macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dhruvdabhi101/d3-harness/main/install.sh | sh
+```
+
+The installer verifies the archive checksum and installs `d3` to `~/.local/bin`.
+Set `D3_INSTALL_DIR` to choose another directory. Add that directory to your
+`PATH`. Run the same command to update. The TUI checks GitHub for a newer stable
+release at startup and displays a notice when one is available. The check
+fails silently when offline.
+
+To publish a release, set the version in `Cargo.toml`, update `Cargo.lock`, and
+push a matching tag such as `v0.1.0`. GitHub Actions builds the release assets.
+
 ## Build
 
 ```bash
 cargo build --release
-./target/release/harness --help
+./target/release/d3 --help
 ```
 
-Install it somewhere on `PATH` if you like:
+Install the `d3` command from the repository directory:
 
 ```bash
-cargo install --path .
+./scripts/build-install.sh
 ```
+
+Then run `d3` from any project directory. Cargo installs the command in
+`~/.cargo/bin`; make sure that directory is on your `PATH`. Existing harness
+configuration and credentials remain in their current locations.
 
 ## Quick start with OpenCode
 
 Run it:
 
 ```bash
-harness "explain what this repository does"
+d3 "explain what this repository does"
 ```
 
 If no key is configured, the harness asks for one, hides the input, saves it to
@@ -42,15 +63,15 @@ The default provider is `opencode` and the default model is
 selected:
 
 ```bash
-harness -m gpt-5.3-codex "fix the failing test"
-harness -m claude-sonnet-4-5 "review this diff"
-harness --list-models
+d3 -m gpt-5.3-codex "fix the failing test"
+d3 -m claude-sonnet-4-5 "review this diff"
+d3 --list-models
 ```
 
 Run without a prompt for the full-screen interface:
 
 ```bash
-harness
+d3
 ```
 
 The TUI handles first-run setup itself. If the selected provider has no
@@ -60,7 +81,7 @@ approval, then connects without leaving the UI. API-key providers ask for the ke
 inside a masked modal. Credentials are saved with `0600` permissions and reused
 on the next run.
 
-Options must come before the prompt. `harness "prompt" --yes` treats `--yes` as
+Options must come before the prompt. `d3 "prompt" --yes` treats `--yes` as
 part of the prompt.
 
 ## TUI
@@ -102,8 +123,8 @@ Features:
 - Bottom approval bar for shell commands, with the exact command shown.
 - Question modal for `ask_user`, with options and free-form input.
 - Sidebar with session model, approval mode, plan/todos, message and token counts.
-- Scrollback with PageUp/PageDown, mouse wheel, and auto-follow that pauses when
-  you scroll up.
+- Scrollback with PageUp/PageDown and auto-follow that pauses when you scroll up.
+  Mouse selection is handled by your terminal, so you can select and copy text.
 - Multi-line editor with history, bracketed paste, and proper cursor movement.
 
 Keybindings:
@@ -111,7 +132,7 @@ Keybindings:
 | Key | Action |
 | --- | --- |
 | `Enter` | send |
-| `Shift+Enter` / `Alt+Enter` | newline |
+| `Ctrl+Enter` / `Shift+Enter` / `Alt+Enter` / `Ctrl+J` | newline (modified Enter depends on terminal support) |
 | `/` | open the command palette |
 | `Tab` | complete/open the command palette |
 | `Up` / `Down` | history or move through the palette |
@@ -155,7 +176,7 @@ The plain line-based REPL is still available with `--no-tui`.
 - **First-run setup**: asks for a missing API key in the terminal, hides the
   input, stores it with `0600` permissions, and reuses it next time.
 - **Model discovery**: fetches the provider's model catalog and supports
-  `harness --list-models` and the interactive `/models` picker.
+  `d3 --list-models` and the interactive `/models` picker.
 - **Full-screen TUI**: streaming messages, tool diffs, plan sidebar, command
   palette, model picker, and approval/question modals.
 - **ChatGPT authentication**: reuse the login saved by Codex CLI, including
@@ -182,8 +203,8 @@ Built-in presets:
 | `ollama` | OpenAI compatible | none (uses `local`) | `qwen3-coder` |
 | `lmstudio` | OpenAI compatible | none (uses `local`) | `local-model` |
 
-List them with `harness --list-providers`, and fetch the selected provider's
-models with `harness --list-models`.
+List them with `d3 --list-providers`, and fetch the selected provider's
+models with `d3 --list-models`.
 
 ### Custom providers
 
@@ -229,7 +250,7 @@ If you already use Codex models through OpenCode, this works too because
 OpenCode's gateway translates text models across its APIs:
 
 ```bash
-harness -p opencode -m gpt-5.3-codex "implement the endpoint"
+d3 -p opencode -m gpt-5.3-codex "implement the endpoint"
 ```
 
 ## Configuration
@@ -238,8 +259,14 @@ The harness reads configuration in this order:
 
 1. `--config <path>` if given (no other config files are merged).
 2. `~/.config/harness/config.json`.
-3. The nearest `harness.json` or `.harness/config.json` from the workspace up
-   to the filesystem root. Project values override global values.
+3. The last provider and model selected in the TUI, stored in
+   `~/.config/harness/selection.json` (or under `$XDG_CONFIG_HOME`).
+4. The nearest `harness.json` or `.harness/config.json` from the workspace up
+   to the filesystem root. Project values override global and saved selections.
+
+An explicit `--config` bypasses the saved selection. Environment variables and
+CLI options override it as well. The message editor wraps long input and grows
+to six rows; longer input scrolls within the editor.
 
 Environment overrides: `HARNESS_PROVIDER`, `HARNESS_MODEL`,
 `HARNESS_MAX_STEPS`, `HARNESS_API_KEY`.
@@ -258,7 +285,7 @@ The key is saved to `~/.config/harness/auth.json` (or
 `$XDG_CONFIG_HOME/harness/auth.json`) with `0600` permissions and reused on the
 next run. It is checked against the provider's model catalog before the session
 starts; a key the provider rejects is removed instead of being kept. Run
-`harness --login -p opencode` to force the prompt again, for example to rotate a
+`d3 --login -p opencode` to force the prompt again, for example to rotate a
 key or retry after an invalid one. When stdin is not a terminal, the harness
 never prompts; it fails with the environment variable and config options
 instead.
@@ -347,13 +374,19 @@ file and line references. Run the tests if they are available.
 Search paths:
 
 - `<workspace>/.harness/skills/<name>/SKILL.md`
+- `<workspace>/.agents/skills/<name>/SKILL.md`
 - `<workspace>/.opencode/skills/<name>/SKILL.md`
 - `<workspace>/.opencode/skill/<name>/SKILL.md`
 - `<workspace>/.claude/skills/<name>/SKILL.md`
+- `~/.agents/skills/<name>/SKILL.md`
+- `~/.agent/skills/<name>/SKILL.md`
 - `~/.config/harness/skills/...`
 - `~/.config/opencode/skills/...`
 - `~/.claude/skills/...`
 - Additional paths under `"skills": {"paths": [...]}` in `harness.json`
+
+Skills are discovered at startup; restart the harness after installing new skills.
+When names collide, the first search path above takes precedence.
 
 Only the name and description go into the system prompt. The body is loaded
 when the model calls the `skill` tool, which keeps the context small. Skills can
@@ -405,7 +438,7 @@ A server that fails to start produces a warning and does not stop the session.
 ## CLI
 
 ```text
-harness [OPTIONS] [PROMPT]...
+d3 [OPTIONS] [PROMPT]...
 
   -m, --model <MODEL>          model id
   -p, --provider <PROVIDER>    provider name
@@ -430,10 +463,10 @@ appends the environment, `AGENTS.md`, skills catalog, and harness notes.
 One-shot examples:
 
 ```bash
-harness "add a --json flag to the CLI"
-harness -C ../other-project "why does this test fail?"
-echo "summarize the changes" | harness
-git diff | harness "review this diff for bugs"
+d3 "add a --json flag to the CLI"
+d3 -C ../other-project "why does this test fail?"
+echo "summarize the changes" | d3
+git diff | d3 "review this diff for bugs"
 ```
 
 Interactive commands:
@@ -447,7 +480,7 @@ Interactive commands:
 /login             sign in with ChatGPT or update a key
 /system            how to change the system prompt
 /tools             list available tools
-/skills            list available skills
+/skills            select an available skill (also type $ in a prompt)
 /mcp               list connected MCP servers
 /context           message and token counts
 /approve [on|off]  toggle auto-approval
@@ -479,16 +512,16 @@ The test suite covers:
 To inspect exactly what the model will receive without spending tokens:
 
 ```bash
-harness --dump-context | jq '.system'
-harness --dump-context | jq '.tools[].name'
-harness --list-models
+d3 --dump-context | jq '.system'
+d3 --dump-context | jq '.tools[].name'
+d3 --list-models
 ```
 
 For a live smoke test:
 
 ```bash
 export OPENCODE_API_KEY="..."
-harness -q "Reply with exactly: harness is alive"
+d3 -q "Reply with exactly: harness is alive"
 ```
 
 ## Design notes

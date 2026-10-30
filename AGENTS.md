@@ -1,6 +1,6 @@
 # oc-harness
 
-A Rust CLI coding agent. The binary is `harness`, the crate is `oc-harness`.
+A Rust CLI coding agent. The binary is `d3`, the crate is `oc-harness`.
 
 ## Build and verify
 
@@ -11,7 +11,7 @@ cargo test
 ```
 
 Run the binary from source with `cargo run -- <args>` or
-`./target/debug/harness <args>`.
+`./target/debug/d3 <args>`.
 
 ## Layout
 

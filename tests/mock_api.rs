@@ -67,7 +67,7 @@ async fn agent_loop_writes_file_and_keeps_context() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_harness"))
+    let output = Command::new(env!("CARGO_BIN_EXE_d3"))
         .arg("--yes")
         .arg("--config")
         .arg(&config_path)

@@ -49,7 +49,7 @@ async fn list_models_fetches_and_prints_the_provider_catalog() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_harness"))
+    let output = Command::new(env!("CARGO_BIN_EXE_d3"))
         .arg("--list-models")
         .arg("--config")
         .arg(&config)

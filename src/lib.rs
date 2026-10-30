@@ -11,6 +11,7 @@ pub mod tools;
 pub mod tui;
 pub mod ui;
 pub mod ui_bridge;
+mod update;
 
 use anyhow::{Context, Result};
 use cli::Cli;
@@ -113,7 +114,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 if message.contains("401") || message.contains("403") {
                     let _ = config::remove_api_key(&provider_name);
                     anyhow::bail!(
-                        "the provider rejected that API key, so it was not kept. Run `harness --login -p {provider_name}` to try again."
+                        "the provider rejected that API key, so it was not kept. Run `d3 --login -p {provider_name}` to try again."
                     );
                 }
                 ui::warn(&format!(
@@ -139,7 +140,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 if !had_key && (message.contains("401") || message.contains("403")) {
                     let _ = config::remove_api_key(&provider_name);
                     anyhow::bail!(
-                        "the provider rejected that API key, so it was not kept. Run `harness --login -p {provider_name}` to try again."
+                        "the provider rejected that API key, so it was not kept. Run `d3 --login -p {provider_name}` to try again."
                     );
                 }
                 return Err(error);
@@ -209,7 +210,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     if message.contains("401") || message.contains("403") {
                         let _ = config::remove_api_key(&provider_name);
                         anyhow::bail!(
-                            "the provider rejected the API key. Run `harness --login -p {provider_name}` to try again."
+                            "the provider rejected the API key. Run `d3 --login -p {provider_name}` to try again."
                         );
                     }
                 }
@@ -242,12 +243,20 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
 
     if !interactive {
         anyhow::bail!(
-            "no prompt given. Pass a prompt, or pipe one in:\n  harness \"explain this repo\"\n  echo \"fix the tests\" | harness"
+            "no prompt given. Pass a prompt, or pipe one in:\n  d3 \"explain this repo\"\n  echo \"fix the tests\" | d3"
         );
     }
 
     if !cli.no_tui {
         let setup = tui::setup();
+        let update_ui = setup.agent_ui.clone();
+        tokio::spawn(async move {
+            if let Some(version) = update::check().await {
+                update_ui.info(&format!(
+                    "d3 {version} is available. Run the install command in the README to update."
+                ));
+            }
+        });
         let tools = ToolRegistry::new(
             cwd.clone(),
             skills,
@@ -277,7 +286,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             model: model.clone(),
             workspace: cwd.clone(),
             branch: git_branch(&cwd),
-            skills: tools.skill_names().len(),
+            skills: tools.skill_names(),
             mcp: mcp_count,
             tools: tool_count,
             auto_approve: cfg.auto_approve,

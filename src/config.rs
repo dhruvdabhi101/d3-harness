@@ -204,6 +204,11 @@ impl Config {
             {
                 cfg = cfg.merge(Config::from_file(&global)?);
             }
+            if let Some(path) = selection_path()
+                && path.exists()
+            {
+                cfg = cfg.merge(Config::from_file(&path)?);
+            }
             if let Some(project) = find_project_config(workspace) {
                 cfg = cfg.merge(Config::from_file(&project)?);
             }
@@ -297,6 +302,23 @@ impl Config {
     }
 }
 
+fn selection_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|dir| dir.join("harness").join("selection.json"))
+}
+
+pub fn store_selection(provider: &str, model: &str) -> Result<()> {
+    let path = selection_path().context("finding user config directory")?;
+    write_selection(&path, provider, model)
+}
+
+fn write_selection(path: &Path, provider: &str, model: &str) -> Result<()> {
+    write_private_json(
+        path,
+        &serde_json::json!({"provider": provider, "model": model}),
+    )
+    .with_context(|| format!("saving selection to {}", path.display()))
+}
+
 fn global_config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|dir| dir.join("harness").join("config.json"))
 }
@@ -341,7 +363,7 @@ pub fn resolve_api_key(name: &str, cfg: &ProviderConfig, interactive: bool) -> R
     }
     let env_name = cfg.api_key_env.as_deref().unwrap_or("HARNESS_API_KEY");
     bail!(
-        "missing API key for provider '{name}'. Set {env_name}, add \"api_key\" to harness.json, or run `harness --login -p {name}`."
+        "missing API key for provider '{name}'. Set {env_name}, add \"api_key\" to harness.json, or run `d3 --login -p {name}`."
     )
 }
 
@@ -692,6 +714,22 @@ fn preset(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selection_round_trips_and_overrides_global_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("selection.json");
+        write_selection(&path, "openai", "chosen-model").unwrap();
+        let global = Config::from_file_str(r#"{"provider":"opencode","model":"default"}"#).unwrap();
+        let loaded = global.merge(Config::from_file(&path).unwrap());
+        assert_eq!(loaded.provider.as_deref(), Some("openai"));
+        assert_eq!(loaded.model.as_deref(), Some("chosen-model"));
+        let project = Config::from_file_str(r#"{"model":"project-model"}"#).unwrap();
+        assert_eq!(
+            loaded.merge(project).model.as_deref(),
+            Some("project-model")
+        );
+    }
 
     #[test]
     fn project_config_overrides_provider_fields() {

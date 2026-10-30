@@ -16,13 +16,20 @@ pub struct SkillSet {
 
 impl SkillSet {
     pub fn discover(workspace: &Path, extra_paths: &[String]) -> Self {
+        Self::discover_with_home(workspace, extra_paths, dirs::home_dir().as_deref())
+    }
+
+    fn discover_with_home(workspace: &Path, extra_paths: &[String], home: Option<&Path>) -> Self {
         let mut roots = vec![
             workspace.join(".harness").join("skills"),
+            workspace.join(".agents").join("skills"),
             workspace.join(".opencode").join("skills"),
             workspace.join(".opencode").join("skill"),
             workspace.join(".claude").join("skills"),
         ];
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = home {
+            roots.push(home.join(".agents").join("skills"));
+            roots.push(home.join(".agent").join("skills"));
             roots.push(home.join(".config").join("harness").join("skills"));
             roots.push(home.join(".config").join("opencode").join("skills"));
             roots.push(home.join(".claude").join("skills"));
@@ -255,6 +262,39 @@ mod tests {
         let (front, body) = split_frontmatter("---\nname: x\n---\n# Body\n");
         assert!(front.contains("name: x"));
         assert_eq!(body, "# Body\n");
+    }
+
+    #[test]
+    fn discovers_agent_home_skills() {
+        let workspace = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let skill = home.path().join(".agent/skills/new-skill");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: new-skill\n---\nInstructions",
+        )
+        .unwrap();
+        let set = SkillSet::discover_with_home(workspace.path(), &[], Some(home.path()));
+        assert!(set.get("new-skill").is_some());
+    }
+
+    #[test]
+    fn discovers_agents_skills_in_workspace_and_home() {
+        let workspace = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        for (root, name) in [(workspace.path(), "project"), (home.path(), "global")] {
+            let dir = root.join(".agents/skills").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\n---\nInstructions"),
+            )
+            .unwrap();
+        }
+        let set = SkillSet::discover_with_home(workspace.path(), &[], Some(home.path()));
+        assert!(set.get("project").is_some());
+        assert!(set.get("global").is_some());
     }
 
     #[test]

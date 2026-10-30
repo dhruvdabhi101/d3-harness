@@ -6,7 +6,7 @@ use std::path::PathBuf;
 /// Run with a prompt for one-shot use, or without one for an interactive
 /// session. Project context comes from AGENTS.md, skills, and MCP servers.
 #[derive(Debug, Parser)]
-#[command(name = "harness", version, about, long_about = None)]
+#[command(name = "d3", version, about, long_about = None)]
 pub struct Cli {
     /// Prompt to run. Omit it to start an interactive session. Use "-" for stdin.
     #[arg(value_name = "PROMPT", trailing_var_arg = true)]

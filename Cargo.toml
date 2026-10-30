@@ -6,7 +6,7 @@ description = "A small, honest CLI coding harness"
 license = "MIT"
 
 [[bin]]
-name = "harness"
+name = "d3"
 path = "src/main.rs"
 
 [dependencies]

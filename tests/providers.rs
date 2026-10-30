@@ -77,7 +77,7 @@ async fn anthropic_messages_stream_and_tool_results() {
     std::fs::write(project.path().join("note.txt"), "anthropic read this\n").unwrap();
     let config = write_config(project.path(), &base, "anthropic", "claude-test");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_harness"))
+    let output = Command::new(env!("CARGO_BIN_EXE_d3"))
         .arg("--yes")
         .arg("--config")
         .arg(&config)
@@ -194,7 +194,7 @@ async fn responses_stream_and_send_function_call_output() {
     let project = tempfile::tempdir().unwrap();
     let config = write_config(project.path(), &base, "responses", "codex-test");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_harness"))
+    let output = Command::new(env!("CARGO_BIN_EXE_d3"))
         .arg("--yes")
         .arg("--config")
         .arg(&config)
@@ -327,7 +327,7 @@ async fn chatgpt_auth_uses_account_headers_and_responses_wire() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_harness"))
+    let output = Command::new(env!("CARGO_BIN_EXE_d3"))
         .arg("--config")
         .arg(&config)
         .arg("-C")

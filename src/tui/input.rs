@@ -16,6 +16,10 @@ impl InputBuffer {
         &self.text
     }
 
+    pub fn split_at_cursor(&self) -> (&str, &str) {
+        self.text.split_at(self.cursor)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.text.is_empty()
     }

@@ -16,7 +16,7 @@ use ratatui::{
 use similar::TextDiff;
 use std::path::PathBuf;
 use tokio::sync::{mpsc, oneshot};
-use tui_textarea::TextArea;
+use tui_textarea::{TextArea, WrapMode};
 
 const ACCENT: Color = Color::Rgb(255, 153, 102);
 const ACCENT_DIM: Color = Color::Rgb(160, 100, 70);
@@ -44,7 +44,7 @@ pub struct TuiInfo {
     pub model: String,
     pub workspace: PathBuf,
     pub branch: Option<String>,
-    pub skills: usize,
+    pub skills: Vec<String>,
     pub mcp: usize,
     pub tools: usize,
     pub auto_approve: bool,
@@ -54,6 +54,7 @@ pub struct TuiInfo {
 
 pub struct App {
     info: TuiInfo,
+    save_selection: fn(&str, &str) -> anyhow::Result<()>,
     model: String,
     items: Vec<Item>,
     input: TextArea<'static>,
@@ -122,6 +123,7 @@ struct Palette {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PaletteKind {
     Commands,
+    Skills,
     Models,
     Providers,
 }
@@ -231,6 +233,7 @@ impl App {
         let providers = info.providers.clone();
         let mut app = Self {
             info,
+            save_selection: config::store_selection,
             model,
             items: Vec::new(),
             input: TextArea::default(),
@@ -282,7 +285,9 @@ impl App {
             return;
         }
 
-        let input_height = self.input.lines().len().clamp(1, 6) as u16;
+        self.input.set_wrap_mode(WrapMode::WordOrGlyph);
+        self.input.set_block(Block::bordered());
+        let input_height = self.input.measure(area.width).content_rows.clamp(1, 6);
         let approval_height = self.approval.as_ref().map(approval_height).unwrap_or(0);
         let bottom_height = if approval_height > 0 {
             approval_height
@@ -392,7 +397,14 @@ impl App {
         if inner.width == 0 || inner.height == 0 {
             return;
         }
-        let lines = self.chat_lines();
+        let mut lines = self.chat_lines();
+        for line in &mut lines {
+            if line.style.bg.is_some() {
+                let width = inner.width as usize;
+                let padding = (width - line.width() % width) % width;
+                line.spans.push(Span::raw(" ".repeat(padding)));
+            }
+        }
         let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
         let total = paragraph.line_count(inner.width);
         self.max_scroll = total
@@ -506,7 +518,9 @@ impl App {
             Span::styled(
                 format!(
                     "{} · skills {} · mcp {}",
-                    self.info.tools, self.info.skills, self.info.mcp
+                    self.info.tools,
+                    self.info.skills.len(),
+                    self.info.mcp
                 ),
                 Style::default().fg(DIM),
             ),
@@ -582,7 +596,8 @@ impl App {
                 Style::default().fg(if focused { ACCENT } else { DIM }),
             )));
         self.input.set_block(block);
-        self.input.set_style(Style::default().fg(LIGHT));
+        self.input.set_style(Style::default().fg(LIGHT).bg(USER_BG));
+        self.input.set_cursor_line_style(Style::default());
         self.input
             .set_cursor_style(Style::default().fg(Color::Rgb(20, 20, 24)).bg(ACCENT));
         self.input.set_placeholder_text(if self.busy {
@@ -591,6 +606,24 @@ impl App {
             "Ask anything, or type / for commands"
         });
         self.input.set_placeholder_style(Style::default().fg(FAINT));
+        self.input.clear_custom_highlight();
+        let lines = self.input.lines().to_vec();
+        for (row, line) in lines.iter().enumerate() {
+            for (start, _) in line.match_indices('$') {
+                let name: String = line[start + 1..]
+                    .chars()
+                    .take_while(|ch| ch.is_alphanumeric() || *ch == '-' || *ch == '_')
+                    .collect();
+                if self.info.skills.contains(&name) {
+                    let col = line[..start].chars().count();
+                    self.input.custom_highlight(
+                        ((row, col), (row, col + name.chars().count() + 1)),
+                        Style::default().fg(ACCENT),
+                        1,
+                    );
+                }
+            }
+        }
         frame.render_widget(&self.input, area);
 
         let left = if self.busy {
@@ -633,6 +666,7 @@ impl App {
         frame.render_widget(Clear, area);
         let title = match palette.kind {
             PaletteKind::Commands => " commands ",
+            PaletteKind::Skills => " skills ",
             PaletteKind::Models => " models ",
             PaletteKind::Providers => " providers ",
         };
@@ -713,8 +747,9 @@ impl App {
                 if options.is_empty() {
                     lines.push(Line::from(vec![
                         Span::styled("> ", Style::default().fg(ACCENT)),
-                        Span::raw(input.text().to_string()),
+                        Span::raw(input.split_at_cursor().0.to_string()),
                         Span::styled("▌", Style::default().fg(ACCENT)),
+                        Span::raw(input.split_at_cursor().1.to_string()),
                     ]));
                 } else {
                     for (index, option) in options.iter().enumerate() {
@@ -734,13 +769,14 @@ impl App {
                     lines.push(Line::default());
                     lines.push(Line::from(vec![
                         Span::styled("> ", Style::default().fg(ACCENT)),
-                        Span::raw(input.text().to_string()),
+                        Span::raw(input.split_at_cursor().0.to_string()),
                         Span::styled("▌", Style::default().fg(ACCENT)),
+                        Span::raw(input.split_at_cursor().1.to_string()),
                     ]));
                 }
                 lines.push(Line::default());
                 lines.push(Line::from(Span::styled(
-                    "Enter submit · ↑/↓ choose · Esc skip",
+                    "Enter submit · ↑/↓ choose · ←/→ edit · Esc skip",
                     Style::default().fg(FAINT),
                 )));
             }
@@ -821,16 +857,19 @@ impl App {
                     for line in text.lines() {
                         let prefix = if first { "› " } else { "  " };
                         first = false;
-                        lines.push(Line::from(vec![
-                            Span::styled(
-                                format!(" {prefix}"),
-                                Style::default().fg(ACCENT).bg(USER_BG),
-                            ),
-                            Span::styled(
-                                format!("{line} "),
-                                Style::default().fg(LIGHT).bg(USER_BG),
-                            ),
-                        ]));
+                        lines.push(
+                            Line::from(vec![
+                                Span::styled(
+                                    format!(" {prefix}"),
+                                    Style::default().fg(ACCENT).bg(USER_BG),
+                                ),
+                                Span::styled(
+                                    format!("{line} "),
+                                    Style::default().fg(LIGHT).bg(USER_BG),
+                                ),
+                            ])
+                            .style(Style::default().bg(USER_BG)),
+                        );
                     }
                     lines.push(Line::default());
                 }
@@ -984,7 +1023,7 @@ impl App {
                 KeyCode::Down => self.scroll_down(4),
                 KeyCode::Home => self.scroll = 0,
                 KeyCode::End => self.scroll_to_bottom(),
-                KeyCode::Char('j') => {
+                KeyCode::Char('j') | KeyCode::Enter => {
                     self.input.insert_str("\n");
                 }
                 _ => {}
@@ -1040,6 +1079,8 @@ impl App {
                 self.input.input(key);
                 if was_empty && ch == '/' {
                     self.open_command_palette();
+                } else if ch == '$' {
+                    self.open_skill_palette();
                 } else {
                     self.refresh_palette();
                 }
@@ -1070,6 +1111,13 @@ impl App {
                 }
             }
             KeyCode::Enter | KeyCode::Tab => {
+                if palette.items.is_empty() && palette.kind == PaletteKind::Skills {
+                    self.palette = None;
+                    if key.code == KeyCode::Enter {
+                        self.submit();
+                    }
+                    return;
+                }
                 if let Some(item) = palette.items.get(palette.selected).cloned() {
                     let kind = palette.kind;
                     self.palette = None;
@@ -1077,6 +1125,18 @@ impl App {
                         PaletteKind::Commands => {
                             self.input.clear();
                             self.run_command(&item.value);
+                        }
+                        PaletteKind::Skills => {
+                            let (row, col) = self.input.cursor();
+                            let line = &self.input.lines()[row];
+                            let before: String = line.chars().take(col).collect();
+                            let query_len = before
+                                .rsplit_once('$')
+                                .map_or(0, |(_, q)| q.chars().count() + 1);
+                            for _ in 0..query_len {
+                                self.input.delete_char();
+                            }
+                            self.input.insert_str(format!("${} ", item.value));
                         }
                         PaletteKind::Models => {
                             self.input.clear();
@@ -1091,19 +1151,11 @@ impl App {
             }
             KeyCode::Backspace => {
                 self.input.input(key);
-                if self.input_text().starts_with('/') && !self.input_text().contains(' ') {
-                    self.refresh_palette();
-                } else {
-                    self.palette = None;
-                }
+                self.refresh_palette();
             }
             KeyCode::Char(_) => {
                 self.input.input(key);
-                if self.input_text().starts_with('/') && !self.input_text().contains(' ') {
-                    self.refresh_palette();
-                } else {
-                    self.palette = None;
-                }
+                self.refresh_palette();
             }
             _ => {}
         }
@@ -1157,6 +1209,21 @@ impl App {
                     KeyCode::Down => {
                         if !options.is_empty() {
                             *selected = (*selected + 1) % options.len();
+                        }
+                        self.modal = Some(modal);
+                    }
+                    KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Home
+                    | KeyCode::End
+                    | KeyCode::Delete => {
+                        match key.code {
+                            KeyCode::Left => input.left(),
+                            KeyCode::Right => input.right(),
+                            KeyCode::Home => input.home(),
+                            KeyCode::End => input.end(),
+                            KeyCode::Delete => input.delete(),
+                            _ => unreachable!(),
                         }
                         self.modal = Some(modal);
                     }
@@ -1347,10 +1414,10 @@ impl App {
                 "{} tools: read, write, edit, bash, glob, grep, ask_user, todo_write, skill",
                 self.info.tools
             )),
-            "/skills" => self.push_info(format!(
-                "{} skills discovered. The agent loads one with the skill tool when it matches.",
-                self.info.skills
-            )),
+            "/skills" => {
+                self.set_input_text("$");
+                self.open_skill_palette();
+            },
             "/mcp" => self.push_info(format!("{} MCP servers connected.", self.info.mcp)),
             "/context" => self.push_info(format!(
                 "{} messages · {} input / {} output tokens",
@@ -1411,6 +1478,9 @@ impl App {
         let _ = self
             .commands
             .send(WorkerCommand::SetModel(model.to_string()));
+        if let Err(error) = (self.save_selection)(&self.info.provider, model) {
+            self.push_warn(format!("could not save provider and model: {error:#}"));
+        }
         self.push_info(format!("model: {model}"));
     }
 
@@ -1506,6 +1576,9 @@ impl App {
                 self.connected = true;
                 self.status = "ready".to_string();
                 self.palette = None;
+                if let Err(error) = (self.save_selection)(&choice.name, &choice.model) {
+                    self.push_warn(format!("could not save provider and model: {error:#}"));
+                }
                 self.push_info(format!("connected to {}/{}", choice.name, choice.model));
             }
             Err(error) => {
@@ -1560,7 +1633,47 @@ impl App {
         self.refresh_palette();
     }
 
+    fn open_skill_palette(&mut self) {
+        self.palette = Some(Palette {
+            kind: PaletteKind::Skills,
+            items: Vec::new(),
+            selected: 0,
+        });
+        self.refresh_palette();
+    }
+
     fn refresh_palette(&mut self) {
+        if self
+            .palette
+            .as_ref()
+            .is_some_and(|p| p.kind == PaletteKind::Skills)
+        {
+            let (row, col) = self.input.cursor();
+            let before: String = self.input.lines()[row].chars().take(col).collect();
+            let Some((_, query)) = before.rsplit_once('$') else {
+                self.palette = None;
+                return;
+            };
+            if query.chars().any(char::is_whitespace) {
+                self.palette = None;
+                return;
+            }
+            let query = query.to_ascii_lowercase();
+            let palette = self.palette.as_mut().unwrap();
+            palette.items = self
+                .info
+                .skills
+                .iter()
+                .filter(|name| name.to_ascii_lowercase().contains(&query))
+                .map(|name| PaletteItem {
+                    label: name.clone(),
+                    description: String::new(),
+                    value: name.clone(),
+                })
+                .collect();
+            palette.selected = palette.selected.min(palette.items.len().saturating_sub(1));
+            return;
+        }
         let text = self.input_text();
         let Some(palette) = &mut self.palette else {
             return;
@@ -1972,7 +2085,7 @@ fn help_text() -> String {
         "",
         "Keys",
         "Enter              send",
-        "Shift+Enter        newline",
+        "Ctrl+Enter / Shift+Enter / Alt+Enter / Ctrl+J  newline (terminal support varies)",
         "/                  command palette",
         "Ctrl+B             toggle the sidebar",
         "PageUp/PageDown    scroll the conversation",
@@ -1995,7 +2108,7 @@ mod tests {
             model: "test-model".to_string(),
             workspace: PathBuf::from("/tmp/test-workspace"),
             branch: Some("main".to_string()),
-            skills: 2,
+            skills: vec!["review".to_string(), "teach".to_string()],
             mcp: 0,
             tools: 9,
             auto_approve: false,
@@ -2020,6 +2133,99 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    #[test]
+    fn question_answer_can_be_edited_with_arrow_keys() {
+        let (mut app, _rx) = app();
+        let (tx, rx) = oneshot::channel();
+        app.handle_tool_request(ToolRequest::Ask {
+            question: "Choose".into(),
+            options: vec!["first".into(), "second".into()],
+            respond: tx,
+        });
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Up);
+        for ch in "ac".chars() {
+            key(&mut app, KeyCode::Char(ch));
+        }
+        key(&mut app, KeyCode::Left);
+        key(&mut app, KeyCode::Char('b'));
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(rx.blocking_recv().unwrap(), Some("abc".into()));
+    }
+
+    #[test]
+    fn input_text_is_not_underlined() {
+        let (mut app, _rx) = app();
+        app.set_input_text("hello");
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let cell = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .find(|cell| cell.symbol() == "h" && cell.fg == LIGHT)
+            .unwrap();
+        assert!(!cell.modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn skills_palette_selects_and_unmatched_text_is_sent() {
+        let (mut app, mut rx) = app();
+        for ch in "/skills".chars() {
+            key(&mut app, KeyCode::Char(ch));
+        }
+        key(&mut app, KeyCode::Tab);
+        assert_eq!(app.palette.as_ref().unwrap().items.len(), 2);
+        for ch in "rev".chars() {
+            key(&mut app, KeyCode::Char(ch));
+        }
+        assert_eq!(app.palette.as_ref().unwrap().items.len(), 1);
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.input_text(), "$review ");
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .any(|cell| cell.symbol() == "$" && cell.fg == ACCENT)
+        );
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(rx.try_recv(), Ok(WorkerCommand::Run(text)) if text == "$review"));
+        app.busy = false;
+        app.input.clear();
+        for ch in "hello $unknown".chars() {
+            key(&mut app, KeyCode::Char(ch));
+        }
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(rx.try_recv(), Ok(WorkerCommand::Run(text)) if text == "hello $unknown"));
+    }
+
+    #[test]
+    fn ctrl_enter_inserts_newline() {
+        let (mut app, _rx) = app();
+        key(&mut app, KeyCode::Char('a'));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::CONTROL,
+        )));
+        key(&mut app, KeyCode::Char('b'));
+        assert_eq!(app.input_text(), "a\nb");
+    }
+
+    #[test]
+    fn long_input_wraps_and_grows() {
+        let (mut app, _rx) = app();
+        app.set_input_text(format!("{} {}", "a".repeat(120), "secondrowmarker"));
+        let screen = text(&mut app);
+        assert!(screen.contains("secondrowmarker"), "{screen}");
+        assert_eq!(app.input.lines().len(), 1);
+        assert!(app.input.measure(120).content_rows > 1);
     }
 
     #[test]
@@ -2092,7 +2298,7 @@ mod tests {
             model: "alt-model".to_string(),
             workspace: PathBuf::from("/tmp/test-workspace"),
             branch: None,
-            skills: 0,
+            skills: Vec::new(),
             mcp: 0,
             tools: 9,
             auto_approve: false,
@@ -2100,6 +2306,7 @@ mod tests {
             providers: vec![choice],
         };
         let mut app = App::new(info, tx, login_tx);
+        app.save_selection = |_, _| Ok(());
         app.switch_provider("alt");
         assert!(app.connected);
         assert_eq!(app.model, "alt-model");

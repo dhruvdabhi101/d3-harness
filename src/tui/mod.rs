@@ -9,9 +9,7 @@ use app::{App, TuiInfo};
 use async_trait::async_trait;
 use crossterm::{
     cursor::Show,
-    event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    },
+    event::{self, DisableBracketedPaste, EnableBracketedPaste},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -461,13 +459,7 @@ struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(
-            stdout(),
-            LeaveAlternateScreen,
-            DisableMouseCapture,
-            DisableBracketedPaste,
-            Show
-        );
+        let _ = execute!(stdout(), LeaveAlternateScreen, DisableBracketedPaste, Show);
     }
 }
 
@@ -476,13 +468,8 @@ impl TuiTerminal {
         enable_raw_mode().context("enabling raw mode")?;
         let guard = TerminalGuard;
         let mut out = stdout();
-        execute!(
-            out,
-            EnterAlternateScreen,
-            EnableMouseCapture,
-            EnableBracketedPaste
-        )
-        .context("entering the alternate screen")?;
+        execute!(out, EnterAlternateScreen, EnableBracketedPaste)
+            .context("entering the alternate screen")?;
         let backend = CrosstermBackend::new(out);
         let terminal = Terminal::new(backend)?;
         Ok(Self {
