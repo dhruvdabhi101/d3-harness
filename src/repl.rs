@@ -59,6 +59,26 @@ async fn command(agent: &mut Agent, input: &str) -> Result<bool> {
             agent.clear();
             ui::info("conversation cleared");
         }
+        "/resume" if argument.is_empty() => {
+            for session in agent.list_sessions()? {
+                eprintln!("{}\t{}", session.id, session.title);
+            }
+            ui::info("Use /resume <ID> or /continue for the latest conversation.");
+        }
+        "/resume" | "/continue" => {
+            let messages = agent.resume_session(if argument.is_empty() {
+                None
+            } else {
+                Some(argument)
+            })?;
+            for message in messages {
+                let text = message.text();
+                if !text.is_empty() {
+                    eprintln!("{text}");
+                }
+            }
+            ui::info("resumed project conversation");
+        }
         "/model" => {
             if argument.is_empty() {
                 ui::info(&format!("model: {}", agent.model()));
@@ -205,6 +225,8 @@ fn help() -> String {
     [
         "/help              show this help",
         "/new               clear the conversation",
+        "/resume [id]       list or resume project conversations",
+        "/continue          resume the latest project conversation",
         "/model [id]        show or change the model",
         "/models            fetch models and choose one",
         "/provider          show the current provider",

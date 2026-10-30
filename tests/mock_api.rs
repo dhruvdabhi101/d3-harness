@@ -34,6 +34,16 @@ async fn agent_loop_writes_file_and_keeps_context() {
     });
 
     let project = tempfile::tempdir().unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(project.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let nested = project.path().join("src");
+    std::fs::create_dir(&nested).unwrap();
     std::fs::write(
         project.path().join("AGENTS.md"),
         "PROJECT RULE: use tabs and run the tests.\n",
@@ -99,7 +109,7 @@ async fn agent_loop_writes_file_and_keeps_context() {
         .arg("--config")
         .arg(&config_path)
         .arg("-C")
-        .arg(project.path())
+        .arg(&nested)
         .arg("what did you create?")
         .env("MOCK_KEY", "test-key")
         .env("XDG_DATA_HOME", project.path().join("data"))
@@ -127,6 +137,16 @@ async fn agent_loop_writes_file_and_keeps_context() {
     let lines: Vec<_> = listing.lines().collect();
     assert_eq!(lines.len(), 2, "{listing}");
     assert!(lines.iter().all(|line| line.contains("create hello.txt")));
+    let other = tempfile::tempdir().unwrap();
+    let foreign = Command::new(env!("CARGO_BIN_EXE_d3"))
+        .args(["--list-sessions", "-C"])
+        .arg(other.path())
+        .env("XDG_DATA_HOME", project.path().join("data"))
+        .output()
+        .await
+        .unwrap();
+    assert!(foreign.status.success());
+    assert!(foreign.stdout.is_empty());
     let original_id = lines[1].split('\t').next().unwrap();
     let selected = Command::new(env!("CARGO_BIN_EXE_d3"))
         .args(["--resume", original_id, "--config"])

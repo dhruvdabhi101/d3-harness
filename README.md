@@ -34,12 +34,17 @@ local build or an untagged push does not create one.
 ## Resume a conversation
 
 Conversations are saved automatically in the local data directory under
-`d3/sessions`. Run `d3 --continue` (or `d3 -c`) in the same workspace to
+`d3/sessions`. History is scoped to the canonical Git working-tree root, or the
+canonical current folder outside Git. Subfolders of one working tree share
+history. Separate repositories and Git worktrees do not. Run `d3 --continue` (or `d3 -c`) in the same project to
 resume its most recently updated conversation. Add a prompt after the options
 to continue in one-shot mode, for example `d3 -c "continue the task"`.
 To select an older conversation, run `d3 --list-sessions`, then pass its ID to
 `d3 --resume <ID>`. Add a prompt after the ID for one-shot use. Bare `--resume`
-continues the latest conversation. `/new` starts a separate conversation
+continues the latest conversation. Inside chat, `/resume` opens a project
+conversation picker, `/resume <ID>` selects a conversation, and `/continue`
+resumes the latest. The plain REPL lists IDs with `/resume` instead of opening
+a picker. `/new` starts a separate conversation
 without deleting the previous one. Each resumed process saves a separate
 continuation, so concurrent runs do not overwrite one another. `--continue`
 selects the most recently updated continuation.
@@ -49,6 +54,10 @@ include sensitive data. The session directory and files are private to your
 user on Unix. Delete the files to remove saved conversations. The current
 provider, model, permissions, and system prompt are loaded again on restart;
 use the same provider when resuming provider-specific tool history.
+
+Older snapshots created from a repository subfolder before v0.2.0 stay under
+their previous folder key. They are not automatically migrated or shown in the
+repository-root history. Root-folder snapshots remain available.
 
 If the process stops during a tool call, the last complete checkpoint is
 resumed. The tool may already have changed files or run commands, so inspect
@@ -114,31 +123,26 @@ part of the prompt.
 The interactive mode is a real terminal application, not a line reader.
 
 ```text
- ◆ harness 0.1.0  oc-rust-harness                       ready  chatgpt/gpt-5.6-sol
-                                                    ╭ session ──────────────────╮
-    › add a timeout to the fetch helper              │provider  chatgpt         │
-                                                     │model     gpt-5.6-sol     │
-  ◆ I’ll read the helper and the tests first.        │approval  ask             │
-    ● read  src/fetch.rs                             │                          │
-      src/fetch.rs (86 lines)                        │PLAN                      │
-    ┌ src/fetch.rs                                   │  [~] read helper        │
-    │ @@ -40,6 +40,8 @@                              │  [ ] add timeout        │
-    │ -    let response = client.get(url).await?;     │  [ ] run tests          │
-    │ +    let response = timeout(…).await??;         │                          │
-                                                     │CONTEXT                   │
-  ◆ Added a 10s timeout and updated the test.         │  messages  4             │
-                                                     │  tokens    8.2k / 412    │
- ╭ message ──────────────────────────────────────────╯                          │
- │ Ask anything, or type / for commands                                          │
- ╰───────────────────────────────────────────────────────────────────────────────╯
- Enter send · Shift+Enter newline · / commands · Ctrl+B sidebar          ready
+    › find references to fetch
+
+    ▸ ● grep  fetch
+
+    Found the references in src/client.rs.
+
+ ╭ message ─────────────────────────────────────────────────────────────────╮
+ │ Ask anything, or type / for commands                                      │
+ ╰──────────────────────────────────────────────────────────────────────────╯
+ chatgpt/gpt-5.6-sol · main · approval ask · ready
 ```
 
 Features:
 
 - Streamed assistant text with light markdown and code styling.
 - Distinct backgrounds for your prompt and the assistant's answer.
-- Tool calls as live rows with spinner, result summary, and color-coded diffs.
+- Tool calls as collapsed rows with a spinner and success or error status. Click
+  a row to expand the full model-visible output, then click again to collapse.
+  Restored conversations include the saved tool calls and results.
+- Color-coded edit diffs remain visible for review.
 - Approval bar docked at the bottom, not a centered dialog, with the command and
   `[y] allow / [n] deny` in reach.
 - Slash-command palette that opens as soon as you type `/`.
@@ -147,9 +151,11 @@ Features:
 - Live model picker via `/models`, fetched from the provider catalog.
 - Bottom approval bar for shell commands, with the exact command shown.
 - Question modal for `ask_user`, with options and free-form input.
-- Sidebar with session model, approval mode, plan/todos, message and token counts.
+- Bottom status line with provider, model, Git branch, and approval mode.
+- `/context` shows message and token counts without a sidebar.
 - Scrollback with PageUp/PageDown and auto-follow that pauses when you scroll up.
-  Mouse selection is handled by your terminal, so you can select and copy text.
+  Mouse capture enables tool-row clicks. Hold your terminal's selection modifier,
+  commonly Shift, to select and copy text.
 - Multi-line editor with history, bracketed paste, and proper cursor movement.
 
 Keybindings:
@@ -162,7 +168,7 @@ Keybindings:
 | `Tab` | complete/open the command palette |
 | `Up` / `Down` | history or move through the palette |
 | `PageUp` / `PageDown` | scroll the conversation |
-| `Ctrl+B` | show/hide the sidebar |
+| Click a tool row | expand or collapse its output |
 | `Ctrl+U` / `Ctrl+W` | clear line / delete word |
 | `Ctrl+C` twice | quit while a turn is running |
 | `Ctrl+D` | quit when the input is empty |
@@ -180,6 +186,32 @@ The TUI is built on maintained crates:
 - `crossterm` for the terminal backend.
 
 The plain line-based REPL is still available with `--no-tui`.
+
+### Customize the UI
+
+Add a `ui` object to the global `~/.config/harness/harness.json` or project
+`harness.json`, then restart. Project settings override individual global
+settings. `/ui` lists the available settings. No plugins or executable theme
+files are loaded.
+
+```json
+{
+  "ui": {
+    "accent": "#FF9966",
+    "user_background": "#232B38",
+    "assistant_background": "#1A1D23",
+    "tool_output_expanded": false,
+    "editor_max_height": 6
+  }
+}
+```
+
+Colors accept `#RRGGBB`. `editor_max_height` accepts 1 through 20 content rows.
+Tool output starts collapsed unless `tool_output_expanded` is true. The default
+editor limit is six rows. Enter still sends and modified Enter adds a newline;
+the footer no longer repeats those hints. The sidebar and Ctrl+B toggle are
+removed.
+
 
 ## What it does
 

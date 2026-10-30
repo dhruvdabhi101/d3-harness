@@ -175,6 +175,53 @@ pub struct SkillConfig {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UiConfig {
+    pub accent: Option<String>,
+    pub user_background: Option<String>,
+    pub assistant_background: Option<String>,
+    pub tool_output_expanded: Option<bool>,
+    pub editor_max_height: Option<u16>,
+}
+
+impl UiConfig {
+    fn merge(self, over: Self) -> Self {
+        Self {
+            accent: over.accent.or(self.accent),
+            user_background: over.user_background.or(self.user_background),
+            assistant_background: over.assistant_background.or(self.assistant_background),
+            tool_output_expanded: over.tool_output_expanded.or(self.tool_output_expanded),
+            editor_max_height: over.editor_max_height.or(self.editor_max_height),
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        for color in [
+            &self.accent,
+            &self.user_background,
+            &self.assistant_background,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if color.len() != 7
+                || !color.starts_with('#')
+                || !color[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                bail!("UI colors must use #RRGGBB, got '{color}'");
+            }
+        }
+        if self
+            .editor_max_height
+            .is_some_and(|height| !(1..=20).contains(&height))
+        {
+            bail!("ui.editor_max_height must be between 1 and 20");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub provider: Option<String>,
@@ -184,6 +231,7 @@ pub struct Config {
     pub max_steps: Option<usize>,
     pub auto_approve: bool,
     pub permissions: Permissions,
+    pub ui: UiConfig,
     pub providers: BTreeMap<String, ProviderConfig>,
     pub mcp: McpConfig,
     pub skills: SkillConfig,
@@ -229,6 +277,7 @@ impl Config {
         {
             cfg.max_steps = Some(steps);
         }
+        cfg.ui.validate()?;
         Ok(cfg)
     }
 
@@ -272,6 +321,7 @@ impl Config {
             max_steps: over.max_steps.or(self.max_steps),
             auto_approve: self.auto_approve || over.auto_approve,
             permissions: self.permissions.merge(over.permissions),
+            ui: self.ui.merge(over.ui),
             providers,
             mcp: McpConfig {
                 servers: mcp_servers,
@@ -714,6 +764,35 @@ fn preset(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ui_settings_merge_individually_and_reject_invalid_values() {
+        let base: Config = serde_json::from_value(
+            serde_json::json!({"ui": {"accent": "#123456", "tool_output_expanded": true}}),
+        )
+        .unwrap();
+        let over: Config = serde_json::from_value(
+            serde_json::json!({"ui": {"editor_max_height": 3, "tool_output_expanded": false}}),
+        )
+        .unwrap();
+        let merged = base.merge(over);
+        assert_eq!(merged.ui.accent.as_deref(), Some("#123456"));
+        assert_eq!(merged.ui.tool_output_expanded, Some(false));
+        assert_eq!(merged.ui.editor_max_height, Some(3));
+        assert!(merged.ui.validate().is_ok());
+        for ui in [
+            serde_json::json!({"accent": "orange"}),
+            serde_json::json!({"editor_max_height": 0}),
+            serde_json::json!({"editor_max_height": 21}),
+        ] {
+            assert!(
+                serde_json::from_value::<UiConfig>(ui)
+                    .unwrap()
+                    .validate()
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn selection_round_trips_and_overrides_global_defaults() {

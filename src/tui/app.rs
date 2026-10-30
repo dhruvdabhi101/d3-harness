@@ -5,7 +5,7 @@ use crate::provider::{ModelInfo, Provider, ProviderAuth};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Layout, Rect},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{
@@ -50,6 +50,7 @@ pub struct TuiInfo {
     pub auto_approve: bool,
     pub connected: bool,
     pub providers: Vec<ProviderChoice>,
+    pub ui: config::UiConfig,
 }
 
 pub struct App {
@@ -70,7 +71,7 @@ pub struct App {
     spinner: usize,
     status: String,
     ctrl_c_pending: bool,
-    show_sidebar: bool,
+    tool_hits: Vec<(Rect, usize)>,
     messages: usize,
     input_tokens: u64,
     output_tokens: u64,
@@ -91,6 +92,8 @@ enum Item {
         streaming: bool,
     },
     Tool {
+        expanded: bool,
+        output: String,
         id: String,
         name: String,
         detail: String,
@@ -126,6 +129,7 @@ enum PaletteKind {
     Skills,
     Models,
     Providers,
+    Sessions,
 }
 
 #[derive(Clone)]
@@ -168,6 +172,18 @@ struct CommandSpec {
 }
 
 const COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        name: "/resume",
+        description: "choose a saved conversation in this project",
+    },
+    CommandSpec {
+        name: "/continue",
+        description: "continue the latest conversation in this project",
+    },
+    CommandSpec {
+        name: "/ui",
+        description: "show UI customization settings",
+    },
     CommandSpec {
         name: "/help",
         description: "show commands and shortcuts",
@@ -249,7 +265,7 @@ impl App {
             spinner: 0,
             status: "ready".to_string(),
             ctrl_c_pending: false,
-            show_sidebar: true,
+            tool_hits: Vec::new(),
             messages: 0,
             input_tokens: 0,
             output_tokens: 0,
@@ -264,7 +280,7 @@ impl App {
         };
         if connected {
             app.push_info(
-                "Welcome. Type a request, or / for the command palette. Shift+Enter adds a newline.",
+                "Type a request, or / for commands. /resume opens project conversations.",
             );
         } else {
             app.status = "choose provider".to_string();
@@ -275,28 +291,48 @@ impl App {
     }
 
     pub fn restore_messages(&mut self, messages: &[crate::conversation::Message]) {
-        use crate::conversation::Role;
+        use crate::conversation::{Block, Role};
         for message in messages {
-            let text = message.text();
-            if text.is_empty() {
-                continue;
-            }
-            match message.role {
-                Role::User => {
-                    self.history.push(text.clone());
-                    self.items.push(Item::User(text));
-                    self.messages += 1;
+            for block in &message.blocks {
+                match block {
+                    Block::Text(text) if message.role == Role::User => {
+                        self.history.push(text.clone());
+                        self.items.push(Item::User(text.clone()));
+                        self.messages += 1;
+                    }
+                    Block::Text(text) if message.role == Role::Assistant => {
+                        self.items.push(Item::Assistant {
+                            text: text.clone(),
+                            streaming: false,
+                        });
+                    }
+                    Block::ToolCall(call) => self.handle_notice(AgentNotice::ToolCall {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        detail: call.arguments.clone(),
+                    }),
+                    Block::ToolResult {
+                        tool_call_id,
+                        content,
+                        is_error,
+                    } => {
+                        self.handle_notice(AgentNotice::ToolResult {
+                            id: tool_call_id.clone(),
+                            summary: String::new(),
+                            is_error: *is_error,
+                        });
+                        self.handle_notice(AgentNotice::ToolOutput {
+                            id: tool_call_id.clone(),
+                            content: content.clone(),
+                        });
+                    }
+                    _ => {}
                 }
-                Role::Assistant => self.items.push(Item::Assistant {
-                    text,
-                    streaming: false,
-                }),
-                Role::Tool => {}
             }
         }
         if !messages.is_empty() {
             self.push_info(
-                "Resumed saved conversation. Tool results are included in model context.",
+                "Resumed project conversation. Click a tool row to inspect its saved output.",
             );
         }
     }
@@ -314,104 +350,77 @@ impl App {
 
         self.input.set_wrap_mode(WrapMode::WordOrGlyph);
         self.input.set_block(Block::bordered());
-        let input_height = self.input.measure(area.width).content_rows.clamp(1, 6);
+        let input_height = self
+            .input
+            .measure(area.width)
+            .content_rows
+            .clamp(1, self.info.ui.editor_max_height.unwrap_or(6));
         let approval_height = self.approval.as_ref().map(approval_height).unwrap_or(0);
         let bottom_height = if approval_height > 0 {
             approval_height
         } else {
-            input_height + 3
+            input_height + 2
         };
         let chunks = Layout::vertical([
-            Constraint::Length(1),
             Constraint::Min(3),
             Constraint::Length(bottom_height),
+            Constraint::Length(1),
         ])
         .split(area);
 
-        self.draw_header(frame, chunks[0]);
-
-        let (chat_area, sidebar_area) = if self.show_sidebar && area.width >= 108 {
-            let split =
-                Layout::horizontal([Constraint::Min(40), Constraint::Length(38)]).split(chunks[1]);
-            (split[0], Some(split[1]))
-        } else {
-            (chunks[1], None)
-        };
-        self.draw_chat(frame, chat_area);
-        if let Some(sidebar) = sidebar_area {
-            self.draw_sidebar(frame, sidebar);
-        }
+        self.draw_chat(frame, chunks[0]);
+        self.draw_status(frame, chunks[2]);
 
         if let Some(approval) = &self.approval {
-            self.draw_approval(frame, approval, chunks[2]);
+            self.draw_approval(frame, approval, chunks[1]);
         } else {
-            let input_chunks =
-                Layout::vertical([Constraint::Length(input_height + 2), Constraint::Length(1)])
-                    .split(chunks[2]);
-            self.draw_input(frame, input_chunks[0], input_chunks[1], input_height);
+            self.draw_input(frame, chunks[1]);
             if let Some(palette) = &self.palette {
-                self.draw_palette(frame, palette, input_chunks[0]);
+                self.draw_palette(frame, palette, chunks[1]);
             }
         }
         if let Some(modal) = &self.modal {
             self.draw_modal(frame, modal, area);
         }
+        let colors = [
+            (ACCENT, self.info.ui.accent.as_deref()),
+            (USER_BG, self.info.ui.user_background.as_deref()),
+            (ASSISTANT_BG, self.info.ui.assistant_background.as_deref()),
+        ];
+        let colors: Vec<_> = colors
+            .into_iter()
+            .filter_map(|(original, configured)| {
+                configured.map(|value| {
+                    let rgb = u32::from_str_radix(&value[1..], 16).expect("validated UI color");
+                    (
+                        original,
+                        Color::Rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8),
+                    )
+                })
+            })
+            .collect();
+        for cell in &mut frame.buffer_mut().content {
+            if let Some((_, color)) = colors.iter().find(|(original, _)| *original == cell.fg) {
+                cell.fg = *color;
+            }
+            if let Some((_, color)) = colors.iter().find(|(original, _)| *original == cell.bg) {
+                cell.bg = *color;
+            }
+        }
     }
 
-    fn draw_header(&self, frame: &mut Frame, area: Rect) {
-        let area = Rect {
-            x: area.x + 1,
-            width: area.width.saturating_sub(2),
-            ..area
-        };
-        let halves = Layout::horizontal([Constraint::Min(20), Constraint::Length(46)]).split(area);
-        let mut left = vec![
-            Span::styled("◆ ", Style::default().fg(ACCENT)),
-            Span::styled(
-                "harness",
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(" {}", env!("CARGO_PKG_VERSION")),
-                Style::default().fg(FAINT),
-            ),
-        ];
-        if let Some(name) = self
-            .info
-            .workspace
-            .file_name()
-            .and_then(|name| name.to_str())
-        {
-            left.push(Span::styled(format!("  {name}"), Style::default().fg(DIM)));
-        }
-        if let Some(branch) = &self.info.branch {
-            left.push(Span::styled(
-                format!("  {branch}"),
-                Style::default().fg(Color::Rgb(150, 170, 220)),
-            ));
-        }
-        frame.render_widget(Paragraph::new(Line::from(left)), halves[0]);
-
-        let status = if self.busy {
-            format!("{} {} ", spinner(self.spinner), self.status)
+    fn draw_status(&self, frame: &mut Frame, area: Rect) {
+        let approval = if self.info.auto_approve {
+            "auto"
         } else {
-            format!("{} ", self.status)
+            "ask"
         };
-        let model = truncate(&format!(" {}/{} ", self.info.provider, self.model), 46);
-        let right = Line::from(vec![
-            Span::styled(
-                status,
-                Style::default().fg(if self.busy { YELLOW } else { DIM }),
-            ),
-            Span::styled(
-                model,
-                Style::default()
-                    .fg(Color::Rgb(20, 20, 24))
-                    .bg(ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]);
-        frame.render_widget(Paragraph::new(right).alignment(Alignment::Right), halves[1]);
+        let branch = self.info.branch.as_deref().unwrap_or("no branch");
+        let status = format!(
+            " {}/{} · {} · approval {} · {}",
+            self.info.provider, self.model, branch, approval, self.status
+        );
+        frame.render_widget(Paragraph::new(status).style(Style::default().fg(DIM)), area);
     }
 
     fn draw_chat(&mut self, frame: &mut Frame, area: Rect) {
@@ -434,6 +443,31 @@ impl App {
             self.scroll = self.max_scroll;
         } else {
             self.scroll = self.scroll.min(self.max_scroll);
+        }
+        self.tool_hits.clear();
+        let mut start = 1usize;
+        for (index, item) in self.items.iter().enumerate() {
+            let item_lines = self.item_lines(item);
+            let end = start
+                + Paragraph::new(Text::from(item_lines))
+                    .wrap(Wrap { trim: false })
+                    .line_count(inner.width);
+            if matches!(item, Item::Tool { .. }) {
+                let top = start.max(self.scroll as usize);
+                let bottom = end.min(self.scroll as usize + inner.height as usize);
+                if bottom > top {
+                    self.tool_hits.push((
+                        Rect::new(
+                            inner.x,
+                            inner.y + (top - self.scroll as usize) as u16,
+                            inner.width,
+                            (bottom - top) as u16,
+                        ),
+                        index,
+                    ));
+                }
+            }
+            start = end;
         }
         let paragraph = paragraph.scroll((self.scroll, 0));
         frame.render_widget(paragraph, inner);
@@ -467,105 +501,6 @@ impl App {
                 .thumb_style(Style::default().fg(ACCENT_DIM));
             frame.render_stateful_widget(bar, bar_area, &mut state);
         }
-    }
-
-    fn draw_sidebar(&self, frame: &mut Frame, area: Rect) {
-        let block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(FAINT))
-            .title(Line::from(Span::styled(
-                " session ",
-                Style::default().fg(ACCENT),
-            )));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        if inner.height == 0 {
-            return;
-        }
-
-        let mut lines = vec![
-            kv("provider", &self.info.provider, DIM),
-            kv("model", &self.model, ACCENT),
-        ];
-        if let Some(branch) = &self.info.branch {
-            lines.push(kv("branch", branch, Color::Rgb(150, 170, 220)));
-        }
-        lines.push(kv(
-            "approval",
-            if self.info.auto_approve {
-                "auto"
-            } else {
-                "ask"
-            },
-            if self.info.auto_approve { YELLOW } else { DIM },
-        ));
-        lines.push(Line::default());
-        lines.push(Line::from(Span::styled(
-            "PLAN",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        )));
-        if self.todos.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "  no plan yet",
-                Style::default().fg(FAINT),
-            )));
-        } else {
-            for todo in self.todos.iter().take(10) {
-                let color = if todo.starts_with("[x]") {
-                    GREEN
-                } else if todo.starts_with("[~]") {
-                    ACCENT
-                } else {
-                    DIM
-                };
-                lines.push(Line::from(Span::styled(
-                    format!("  {}", truncate(todo, 30)),
-                    Style::default().fg(color),
-                )));
-            }
-        }
-        lines.push(Line::default());
-        lines.push(Line::from(Span::styled(
-            "CONTEXT",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(vec![
-            Span::styled("  messages  ", Style::default().fg(FAINT)),
-            Span::styled(self.messages.to_string(), Style::default().fg(DIM)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("  tokens    ", Style::default().fg(FAINT)),
-            Span::styled(
-                format!(
-                    "{} in / {} out",
-                    short(self.input_tokens),
-                    short(self.output_tokens)
-                ),
-                Style::default().fg(DIM),
-            ),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("  tools     ", Style::default().fg(FAINT)),
-            Span::styled(
-                format!(
-                    "{} · skills {} · mcp {}",
-                    self.info.tools,
-                    self.info.skills.len(),
-                    self.info.mcp
-                ),
-                Style::default().fg(DIM),
-            ),
-        ]));
-        lines.push(Line::default());
-        lines.push(Line::from(Span::styled(
-            "  ctrl+b hides this panel",
-            Style::default().fg(FAINT),
-        )));
-
-        frame.render_widget(
-            Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
-            inner,
-        );
     }
 
     fn draw_approval(&self, frame: &mut Frame, approval: &ApprovalPrompt, area: Rect) {
@@ -611,7 +546,7 @@ impl App {
         );
     }
 
-    fn draw_input(&mut self, frame: &mut Frame, area: Rect, hint_area: Rect, _input_height: u16) {
+    fn draw_input(&mut self, frame: &mut Frame, area: Rect) {
         let focused = !self.busy && self.modal.is_none() && self.approval.is_none();
         let border = if focused { ACCENT } else { ACCENT_DIM };
         let title = if self.busy {
@@ -656,27 +591,6 @@ impl App {
             }
         }
         frame.render_widget(&self.input, area);
-
-        let left = if self.busy {
-            format!(
-                "{} working · Ctrl+C twice to quit · / commands",
-                spinner(self.spinner)
-            )
-        } else {
-            "Enter send · Shift+Enter newline · / commands · Ctrl+B sidebar".to_string()
-        };
-        let right = if self.busy { "" } else { "ready" };
-        let halves =
-            Layout::horizontal([Constraint::Min(20), Constraint::Length(8)]).split(hint_area);
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(left, Style::default().fg(FAINT)))),
-            halves[0],
-        );
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(right, Style::default().fg(FAINT))))
-                .alignment(Alignment::Right),
-            halves[1],
-        );
     }
 
     fn draw_palette(&self, frame: &mut Frame, palette: &Palette, input_area: Rect) {
@@ -700,6 +614,7 @@ impl App {
             PaletteKind::Skills => " skills ",
             PaletteKind::Models => " models ",
             PaletteKind::Providers => " providers ",
+            PaletteKind::Sessions => " project conversations ",
         };
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
@@ -882,103 +797,123 @@ impl App {
     fn chat_lines(&self) -> Vec<Line<'static>> {
         let mut lines = vec![Line::default()];
         for item in &self.items {
-            match item {
-                Item::User(text) => {
-                    let mut first = true;
-                    for line in text.lines() {
-                        let prefix = if first { "› " } else { "  " };
-                        first = false;
-                        lines.push(
-                            Line::from(vec![
-                                Span::styled(
-                                    format!(" {prefix}"),
-                                    Style::default().fg(ACCENT).bg(USER_BG),
-                                ),
-                                Span::styled(
-                                    format!("{line} "),
-                                    Style::default().fg(LIGHT).bg(USER_BG),
-                                ),
-                            ])
-                            .style(Style::default().bg(USER_BG)),
-                        );
+            lines.extend(self.item_lines(item));
+        }
+        lines
+    }
+
+    fn item_lines(&self, item: &Item) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        match item {
+            Item::User(text) => {
+                let mut first = true;
+                for line in text.lines() {
+                    let prefix = if first { "› " } else { "  " };
+                    first = false;
+                    lines.push(
+                        Line::from(vec![
+                            Span::styled(
+                                format!(" {prefix}"),
+                                Style::default().fg(ACCENT).bg(USER_BG),
+                            ),
+                            Span::styled(
+                                format!("{line} "),
+                                Style::default().fg(LIGHT).bg(USER_BG),
+                            ),
+                        ])
+                        .style(Style::default().bg(USER_BG)),
+                    );
+                }
+                lines.push(Line::default());
+            }
+            Item::Assistant { text, streaming } => {
+                lines.extend(assistant_lines(text, *streaming, self.spinner));
+                lines.push(Line::default());
+            }
+            Item::Tool {
+                name,
+                detail,
+                summary,
+                expanded,
+                output,
+                state,
+                ..
+            } => {
+                let (marker, color) = match state {
+                    ToolState::Running => (spinner(self.spinner), YELLOW),
+                    ToolState::Done => ("●", GREEN),
+                    ToolState::Error => ("●", RED),
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  {} {marker} ", if *expanded { "▾" } else { "▸" }),
+                        Style::default().fg(color),
+                    ),
+                    Span::styled(
+                        name.clone(),
+                        Style::default().fg(TOOL).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        if detail.is_empty() {
+                            String::new()
+                        } else {
+                            format!("  {detail}")
+                        },
+                        Style::default().fg(DIM),
+                    ),
+                ]));
+                let visible = if *expanded {
+                    if output.is_empty() {
+                        summary.as_str()
+                    } else {
+                        output.as_str()
                     }
-                    lines.push(Line::default());
+                } else {
+                    ""
+                };
+                for line in visible.lines() {
+                    lines.push(Line::from(Span::styled(
+                        format!("    {line}"),
+                        Style::default().fg(if *state == ToolState::Error {
+                            RED
+                        } else {
+                            FAINT
+                        }),
+                    )));
                 }
-                Item::Assistant { text, streaming } => {
-                    lines.extend(assistant_lines(text, *streaming, self.spinner));
-                    lines.push(Line::default());
+                lines.push(Line::default());
+            }
+            Item::Diff { path, old, new } => {
+                lines.extend(diff_lines(path, old, new));
+                lines.push(Line::default());
+            }
+            Item::Info(text) => {
+                for (index, line) in text.lines().enumerate() {
+                    let prefix = if index == 0 { "  • " } else { "    " };
+                    lines.push(Line::from(Span::styled(
+                        format!("{prefix}{line}"),
+                        Style::default().fg(DIM),
+                    )));
                 }
-                Item::Tool {
-                    name,
-                    detail,
-                    summary,
-                    state,
-                    ..
-                } => {
-                    let (marker, color) = match state {
-                        ToolState::Running => (spinner(self.spinner), YELLOW),
-                        ToolState::Done => ("●", GREEN),
-                        ToolState::Error => ("●", RED),
-                    };
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("  {marker} "), Style::default().fg(color)),
-                        Span::styled(
-                            name.clone(),
-                            Style::default().fg(TOOL).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            if detail.is_empty() {
-                                String::new()
-                            } else {
-                                format!("  {detail}")
-                            },
-                            Style::default().fg(DIM),
-                        ),
-                    ]));
-                    for line in summary.lines().take(3) {
-                        lines.push(Line::from(Span::styled(
-                            format!("    {line}"),
-                            Style::default().fg(if *state == ToolState::Error {
-                                RED
-                            } else {
-                                FAINT
-                            }),
-                        )));
-                    }
-                    lines.push(Line::default());
+                lines.push(Line::default());
+            }
+            Item::Warn(text) => {
+                for line in text.lines() {
+                    lines.push(Line::from(Span::styled(
+                        format!("  ! {line}"),
+                        Style::default().fg(YELLOW),
+                    )));
                 }
-                Item::Diff { path, old, new } => {
-                    lines.extend(diff_lines(path, old, new));
-                    lines.push(Line::default());
+                lines.push(Line::default());
+            }
+            Item::Error(text) => {
+                for line in text.lines() {
+                    lines.push(Line::from(Span::styled(
+                        format!("  ! {line}"),
+                        Style::default().fg(RED),
+                    )));
                 }
-                Item::Info(text) => {
-                    for (index, line) in text.lines().enumerate() {
-                        let prefix = if index == 0 { "  • " } else { "    " };
-                        lines.push(Line::from(Span::styled(
-                            format!("{prefix}{line}"),
-                            Style::default().fg(DIM),
-                        )));
-                    }
-                    lines.push(Line::default());
-                }
-                Item::Warn(text) => {
-                    for line in text.lines() {
-                        lines.push(Line::from(Span::styled(
-                            format!("  ! {line}"),
-                            Style::default().fg(YELLOW),
-                        )));
-                    }
-                    lines.push(Line::default());
-                }
-                Item::Error(text) => {
-                    for line in text.lines() {
-                        lines.push(Line::from(Span::styled(
-                            format!("  ! {line}"),
-                            Style::default().fg(RED),
-                        )));
-                    }
-                    lines.push(Line::default());
-                }
+                lines.push(Line::default());
             }
         }
         lines
@@ -988,6 +923,20 @@ impl App {
         match event {
             Event::Key(key) if key.kind != KeyEventKind::Release => self.handle_key(key),
             Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::Down(crossterm::event::MouseButton::Left)
+                    if self.modal.is_none()
+                        && self.approval.is_none()
+                        && self.palette.is_none() =>
+                {
+                    if let Some((_, index)) = self
+                        .tool_hits
+                        .iter()
+                        .find(|(rect, _)| rect.contains((mouse.column, mouse.row).into()))
+                        && let Item::Tool { expanded, .. } = &mut self.items[*index]
+                    {
+                        *expanded = !*expanded;
+                    }
+                }
                 MouseEventKind::ScrollUp => self.scroll_up(3),
                 MouseEventKind::ScrollDown => self.scroll_down(3),
                 _ => {}
@@ -1044,7 +993,6 @@ impl App {
                     self.input.input(key);
                     self.refresh_palette();
                 }
-                KeyCode::Char('b') => self.show_sidebar = !self.show_sidebar,
                 KeyCode::Char('d') => {
                     if self.input.is_empty() {
                         self.should_quit = true;
@@ -1175,6 +1123,11 @@ impl App {
                         PaletteKind::Models => {
                             self.input.clear();
                             self.set_model(&item.value);
+                        }
+                        PaletteKind::Sessions => {
+                            self.input.clear();
+                            self.busy = true;
+                            let _ = self.commands.send(WorkerCommand::Resume(Some(item.value)));
                         }
                         PaletteKind::Providers => {
                             self.input.clear();
@@ -1409,12 +1362,24 @@ impl App {
         let argument = parts.next().unwrap_or("").trim();
         match command {
             "/help" => self.push_info(help_text()),
+            "/ui" => self.push_info("Customize ui in harness.json or ~/.config/harness/harness.json. Settings: accent, user_background, assistant_background (#RRGGBB), tool_output_expanded (boolean), editor_max_height (1..20). Restart to apply."),
+            "/resume" | "/continue" => {
+                if self.busy { self.push_warn("wait for the current turn to finish first"); return; }
+                self.busy = true;
+                self.status = "loading conversations".to_string();
+                let command = if command == "/continue" { WorkerCommand::Resume(None) }
+                    else if argument.is_empty() { WorkerCommand::ListSessions }
+                    else { WorkerCommand::Resume(Some(argument.to_string())) };
+                let _ = self.commands.send(command);
+            }
             "/new" | "/clear" => {
                 if self.busy {
                     self.push_warn("wait for the current turn to finish first");
                     return;
                 }
                 self.items.clear();
+                self.history.clear();
+                self.history_pos = None;
                 self.messages = 0;
                 self.input_tokens = 0;
                 self.output_tokens = 0;
@@ -1786,6 +1751,8 @@ impl App {
             }
             AgentNotice::ToolCall { id, name, detail } => {
                 self.items.push(Item::Tool {
+                    expanded: self.info.ui.tool_output_expanded.unwrap_or(false),
+                    output: String::new(),
                     id,
                     name,
                     detail,
@@ -1821,12 +1788,23 @@ impl App {
                 }
                 if !found {
                     self.items.push(Item::Tool {
+                        expanded: self.info.ui.tool_output_expanded.unwrap_or(false),
+                        output: String::new(),
                         id,
                         name: "tool".to_string(),
                         detail: String::new(),
                         summary,
                         state,
                     });
+                }
+            }
+            AgentNotice::ToolOutput { id, content } => {
+                if let Some(Item::Tool { output, .. }) =
+                    self.items.iter_mut().rev().find(
+                        |item| matches!(item, Item::Tool { id: tool_id, .. } if *tool_id == id),
+                    )
+                {
+                    *output = content;
                 }
             }
             AgentNotice::Todos(lines) => self.todos = lines,
@@ -1886,6 +1864,48 @@ impl App {
                 }
                 if let Some(Item::Assistant { streaming, .. }) = self.items.last_mut() {
                     *streaming = false;
+                }
+            }
+            WorkerEvent::Sessions(result) => {
+                self.busy = false;
+                self.status = "ready".to_string();
+                match result {
+                    Ok(sessions) if sessions.is_empty() => {
+                        self.push_info("No saved conversations in this project.")
+                    }
+                    Ok(sessions) => {
+                        self.palette = Some(Palette {
+                            kind: PaletteKind::Sessions,
+                            selected: 0,
+                            items: sessions
+                                .into_iter()
+                                .map(|session| PaletteItem {
+                                    label: session.title,
+                                    description: session.id.clone(),
+                                    value: session.id,
+                                })
+                                .collect(),
+                        })
+                    }
+                    Err(error) => self.push_warn(error),
+                }
+            }
+            WorkerEvent::Resumed(result) => {
+                self.busy = false;
+                self.status = "ready".to_string();
+                match result {
+                    Ok(messages) => {
+                        self.items.clear();
+                        self.history.clear();
+                        self.history_pos = None;
+                        self.messages = 0;
+                        self.input_tokens = 0;
+                        self.output_tokens = 0;
+                        self.todos.clear();
+                        self.auto_scroll = true;
+                        self.restore_messages(&messages);
+                    }
+                    Err(error) => self.push_warn(error),
                 }
             }
             WorkerEvent::Models(result) => match result {
@@ -2070,13 +2090,6 @@ fn diff_lines(path: &str, old: &str, new: &str) -> Vec<Line<'static>> {
     lines
 }
 
-fn kv(key: &str, value: &str, color: Color) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("{key:<10}"), Style::default().fg(FAINT)),
-        Span::styled(truncate(value, 21), Style::default().fg(color)),
-    ])
-}
-
 fn spinner(index: usize) -> &'static str {
     const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     FRAMES[index % FRAMES.len()]
@@ -2087,16 +2100,6 @@ fn truncate(text: &str, max: usize) -> String {
         text.to_string()
     } else {
         format!("{}…", text.chars().take(max).collect::<String>())
-    }
-}
-
-fn short(value: u64) -> String {
-    if value >= 1_000_000 {
-        format!("{:.1}m", value as f64 / 1_000_000.0)
-    } else if value >= 1_000 {
-        format!("{:.1}k", value as f64 / 1_000.0)
-    } else {
-        value.to_string()
     }
 }
 
@@ -2121,7 +2124,10 @@ fn help_text() -> String {
         "Enter              send",
         "Ctrl+Enter / Shift+Enter / Alt+Enter / Ctrl+J  newline (terminal support varies)",
         "/                  command palette",
-        "Ctrl+B             toggle the sidebar",
+        "/resume [id]       choose a project conversation",
+        "/continue          resume the latest project conversation",
+        "/ui                show customization settings",
+        "Click tool row     expand or collapse output",
         "PageUp/PageDown    scroll the conversation",
         "Ctrl+C twice       quit while a turn is running",
     ]
@@ -2148,6 +2154,7 @@ mod tests {
             auto_approve: false,
             connected: true,
             providers: Vec::new(),
+            ui: config::UiConfig::default(),
         };
         (App::new(info, tx, login_tx), rx)
     }
@@ -2167,6 +2174,101 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    #[test]
+    fn tool_output_expands_and_collapses_on_click_after_wrapping_and_scrolling() {
+        let (mut app, _rx) = app();
+        app.items.push(Item::User("wrapped text ".repeat(40)));
+        app.handle_notice(AgentNotice::ToolCall {
+            id: "g".into(),
+            name: "grep".into(),
+            detail: "query ".repeat(30),
+        });
+        app.handle_notice(AgentNotice::ToolResult {
+            id: "g".into(),
+            summary: "one match".into(),
+            is_error: false,
+        });
+        app.handle_notice(AgentNotice::ToolOutput {
+            id: "g".into(),
+            content: "hidden-result-line\n".repeat(50),
+        });
+        assert!(!text(&mut app).contains("hidden-result-line"));
+        let hit = app.tool_hits[0].0;
+        let click = Event::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: hit.x,
+            row: hit.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        app.handle_event(click.clone());
+        assert!(text(&mut app).contains("hidden-result-line"));
+        app.scroll_up(10);
+        text(&mut app);
+        let hit = app.tool_hits[0].0;
+        app.handle_event(Event::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: hit.x,
+            row: hit.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(!text(&mut app).contains("hidden-result-line"));
+    }
+
+    #[test]
+    fn resume_picker_replaces_chat_and_restores_tool_results() {
+        let (mut app, mut rx) = app();
+        app.run_command("/resume");
+        assert!(matches!(rx.try_recv(), Ok(WorkerCommand::ListSessions)));
+        app.handle_worker_event(WorkerEvent::Sessions(Ok(vec![
+            crate::session::SessionSummary {
+                id: "saved".into(),
+                title: "old task".into(),
+            },
+        ])));
+        assert!(text(&mut app).contains("old task"));
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(rx.try_recv(), Ok(WorkerCommand::Resume(Some(id))) if id == "saved"));
+        app.handle_worker_event(WorkerEvent::Resumed(Ok(vec![
+            crate::conversation::Message::user("old task"),
+            crate::conversation::Message::assistant(
+                String::new(),
+                vec![crate::conversation::ToolCall {
+                    id: "g".into(),
+                    name: "grep".into(),
+                    arguments: "{}".into(),
+                }],
+            ),
+            crate::conversation::Message::tool_result("g".into(), "saved output".into(), false),
+        ])));
+        assert_eq!(app.history, vec!["old task"]);
+        assert!(text(&mut app).contains("grep"));
+        assert!(
+            matches!(&app.items[1], Item::Tool { output, expanded: false, .. } if output == "saved output")
+        );
+        assert!(!app.busy);
+    }
+
+    #[test]
+    fn status_is_at_bottom_without_sidebar_or_key_hints_and_theme_applies() {
+        let (mut app, _rx) = app();
+        app.info.ui.accent = Some("#123456".into());
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let bottom: String = (0..120).map(|x| buffer[(x, 39)].symbol()).collect();
+        assert!(bottom.contains("test/test-model · main · approval ask"));
+        assert!(
+            buffer
+                .content()
+                .iter()
+                .any(|cell| cell.fg == Color::Rgb(18, 52, 86))
+        );
+        let screen = text(&mut app);
+        assert!(!screen.contains("Enter send"));
+        assert!(!screen.contains("session ─"));
+        assert!(!screen.contains("Ctrl+B"));
     }
 
     #[test]
@@ -2388,6 +2490,7 @@ mod tests {
             tools: 9,
             auto_approve: false,
             connected: false,
+            ui: config::UiConfig::default(),
             providers: vec![choice],
         };
         let mut app = App::new(info, tx, login_tx);

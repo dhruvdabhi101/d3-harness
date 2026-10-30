@@ -2,7 +2,7 @@ use crate::conversation::{Block, Message, ToolCall};
 use crate::provider::{Provider, Usage};
 use crate::tools::ToolRegistry;
 use crate::ui_bridge::AgentUi;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use std::sync::Arc;
 
 pub struct Agent {
@@ -47,6 +47,24 @@ impl Agent {
 
     pub fn messages(&self) -> &[Message] {
         &self.messages
+    }
+
+    pub fn list_sessions(&self) -> Result<Vec<crate::session::SessionSummary>> {
+        self.session
+            .as_ref()
+            .context("conversation storage is unavailable")?
+            .list()
+    }
+
+    pub fn resume_session(&mut self, id: Option<&str>) -> Result<Vec<Message>> {
+        let messages = self
+            .session
+            .as_mut()
+            .context("conversation storage is unavailable")?
+            .resume(id)?;
+        self.messages = messages;
+        self.usage = Usage::default();
+        Ok(self.messages.clone())
     }
 
     fn save(&mut self) -> Result<()> {
@@ -191,6 +209,7 @@ impl Agent {
                     outcome.summary.clone()
                 };
                 self.ui.tool_result(&call.id, &summary, outcome.is_error);
+                self.ui.tool_output(&call.id, &outcome.content);
                 self.messages.push(Message::tool_result(
                     call.id,
                     outcome.content,

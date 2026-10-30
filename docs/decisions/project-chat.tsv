@@ -1,0 +1,8 @@
+ts	phase	decision	why	evidence	result
+2026-07-17T00:00:00Z	design	Keep atomic private JSON snapshots instead of adding SQLite	Existing snapshots already preserve provider tool history and isolate concurrent continuations	src/session.rs	Implemented
+2026-07-17T00:00:00Z	scope	Use canonical Git working-tree root or canonical folder as conversation scope	Share history across repository subfolders without showing unrelated projects	tests/mock_api.rs	Integration test passed
+2026-07-17T00:00:00Z	ui	Use typed configuration instead of executable plugins	Allow colors and layout preferences without new dependencies or executing theme code	src/config.rs	Validation and merge tests passed
+2026-07-17T00:00:00Z	compatibility	Leave old subfolder-keyed snapshots untouched	Avoid silently moving private conversation data across scopes	README.md	Documented limitation
+2026-07-17T00:00:00Z	verification	Drive release binary through tmux with a local mock provider	Check actual resume selection and mouse expansion rather than only compilation	scripts/verify-tui.py	PTY smoke test passed
+2026-07-17T00:00:00Z	review	Review locally without independent model review	This harness has no subagent tool	 src/tui/app.rs	Independent review unavailable
+2026-10-30T11:42:56Z	audit	Correct timestamps in preceding rows	Rows used a placeholder date; the shell clock reports 2026-10-30 and all preceding entries were recorded after verification	docs/decisions/project-chat.tsv	Earlier timestamps are not event timestamps

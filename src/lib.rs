@@ -310,6 +310,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             auto_approve: cfg.auto_approve,
             connected,
             providers: provider_choices(&cfg),
+            ui: cfg.ui.clone(),
         };
         let mut agent = agent::Agent::new(
             provider,

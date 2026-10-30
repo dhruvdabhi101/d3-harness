@@ -32,6 +32,20 @@ pub struct Session {
 
 impl Session {
     pub fn new(workspace: &Path) -> Result<Self> {
+        let workspace = workspace
+            .canonicalize()
+            .context("resolving conversation workspace")?;
+        let root = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&workspace)
+            .args(["rev-parse", "--show-toplevel"])
+            .output();
+        let workspace = match root {
+            Ok(output) if output.status.success() => {
+                PathBuf::from(String::from_utf8(output.stdout)?.trim_end()).canonicalize()?
+            }
+            _ => workspace,
+        };
         let hash = workspace
             .to_string_lossy()
             .as_bytes()

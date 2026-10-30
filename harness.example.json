@@ -3,6 +3,13 @@
   "model": "deepseek-v4.1-flash",
   "max_steps": 1000,
   "auto_approve": false,
+  "ui": {
+    "accent": "#FF9966",
+    "user_background": "#232B38",
+    "assistant_background": "#1A1D23",
+    "tool_output_expanded": false,
+    "editor_max_height": 6
+  },
   "permissions": {
     "shell": "ask",
     "edit": "allow"

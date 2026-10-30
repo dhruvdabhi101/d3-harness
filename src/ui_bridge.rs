@@ -8,6 +8,7 @@ pub trait AgentUi: Send + Sync {
     fn text_done(&self);
     fn tool_call(&self, id: &str, name: &str, detail: &str);
     fn tool_result(&self, id: &str, summary: &str, is_error: bool);
+    fn tool_output(&self, _id: &str, _content: &str) {}
     fn todos(&self, lines: &[String]);
     fn usage(&self, input: u64, output: u64);
     fn info(&self, text: &str);

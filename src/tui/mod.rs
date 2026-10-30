@@ -37,6 +37,10 @@ pub enum AgentNotice {
         summary: String,
         is_error: bool,
     },
+    ToolOutput {
+        id: String,
+        content: String,
+    },
     Todos(Vec<String>),
     Usage {
         input: u64,
@@ -67,6 +71,8 @@ pub enum ToolRequest {
 pub enum WorkerCommand {
     Run(String),
     Clear,
+    ListSessions,
+    Resume(Option<String>),
     SetProvider(Box<Provider>, String),
     SetModel(String),
     SetAutoApprove(bool),
@@ -83,6 +89,8 @@ pub enum LoginEvent {
 pub enum WorkerEvent {
     TurnDone(Result<(), String>),
     Models(Result<Vec<ModelInfo>, String>),
+    Sessions(Result<Vec<crate::session::SessionSummary>, String>),
+    Resumed(Result<Vec<crate::conversation::Message>, String>),
 }
 
 pub struct TuiSetup {
@@ -131,6 +139,13 @@ impl AgentUi for TuiAgentUi {
             id: id.to_string(),
             summary: summary.to_string(),
             is_error,
+        });
+    }
+
+    fn tool_output(&self, id: &str, content: &str) {
+        let _ = self.tx.send(AgentNotice::ToolOutput {
+            id: id.to_string(),
+            content: content.to_string(),
         });
     }
 
@@ -438,6 +453,16 @@ async fn worker(
                 let _ = events.send(WorkerEvent::TurnDone(result));
             }
             WorkerCommand::Clear => agent.clear(),
+            WorkerCommand::ListSessions => {
+                let result = agent.list_sessions().map_err(|error| format!("{error:#}"));
+                let _ = events.send(WorkerEvent::Sessions(result));
+            }
+            WorkerCommand::Resume(id) => {
+                let result = agent
+                    .resume_session(id.as_deref())
+                    .map_err(|error| format!("{error:#}"));
+                let _ = events.send(WorkerEvent::Resumed(result));
+            }
             WorkerCommand::SetProvider(provider, model) => agent.set_provider(*provider, model),
             WorkerCommand::SetModel(model) => agent.set_model(model),
             WorkerCommand::SetAutoApprove(value) => agent.set_auto_approve(value),
