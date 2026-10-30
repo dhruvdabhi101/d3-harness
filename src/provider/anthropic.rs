@@ -176,8 +176,12 @@ fn build_messages(messages: &[Message]) -> Vec<Value> {
     for message in messages {
         let (role, content) = match message.role {
             Role::User => {
-                let text = message.text();
-                ("user", vec![json!({"type": "text", "text": text})])
+                let content = message.blocks.iter().filter_map(|block| match block {
+                    Block::Text(text) if !text.is_empty() => Some(json!({"type": "text", "text": text})),
+                    Block::Image(image) => Some(json!({"type": "image", "source": {"type": "base64", "media_type": image.media_type, "data": image.data}})),
+                    _ => None,
+                }).collect();
+                ("user", content)
             }
             Role::Assistant => {
                 let mut blocks = Vec::new();

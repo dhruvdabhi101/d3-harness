@@ -18,7 +18,14 @@
     "paths": []
   },
   "instructions": [],
-  "providers": {},
+  "providers": {
+    "text-only-example": {
+      "type": "openai",
+      "base_url": "http://localhost:8080/v1",
+      "model": "text-only-model",
+      "image_input": false
+    }
+  },
   "mcp": {
     "servers": {
       "filesystem": {

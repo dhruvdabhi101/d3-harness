@@ -144,8 +144,44 @@ impl Agent {
         self.tools.set_auto_approve(value);
     }
 
+    pub fn cancel_turn(&mut self) -> Result<()> {
+        let completed: std::collections::HashSet<_> = self
+            .messages
+            .iter()
+            .flat_map(|message| &message.blocks)
+            .filter_map(|block| match block {
+                Block::ToolResult { tool_call_id, .. } => Some(tool_call_id.clone()),
+                _ => None,
+            })
+            .collect();
+        let pending: Vec<_> = self
+            .messages
+            .iter()
+            .flat_map(|message| &message.blocks)
+            .filter_map(|block| match block {
+                Block::ToolCall(call) if !completed.contains(&call.id) => Some(call.id.clone()),
+                _ => None,
+            })
+            .collect();
+        for id in pending {
+            self.messages.push(Message::tool_result(id, "Stopped by the user. This tool may have partially executed; inspect its effects before retrying.".into(), true));
+        }
+        self.save()
+    }
+
     pub async fn run_turn(&mut self, input: &str) -> Result<()> {
-        self.messages.push(Message::user(input));
+        self.run_message(Message::user(input)).await
+    }
+
+    pub async fn run_message(&mut self, message: Message) -> Result<()> {
+        if message
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::Image(_)))
+        {
+            self.provider.validate_image_input()?;
+        }
+        self.messages.push(message);
         self.save()?;
         let mut turn_usage = Usage::default();
 

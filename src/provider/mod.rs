@@ -21,6 +21,7 @@ pub struct ToolDefinition {
 pub struct ModelInfo {
     pub id: String,
     pub name: Option<String>,
+    pub image_input: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -51,6 +52,7 @@ pub struct Provider {
     api_key: String,
     account_id: Option<String>,
     client: reqwest::Client,
+    image_capabilities: std::sync::Mutex<std::collections::BTreeMap<String, bool>>,
 }
 
 impl Provider {
@@ -74,6 +76,7 @@ impl Provider {
             api_key: auth.key,
             account_id: auth.account_id,
             client,
+            image_capabilities: std::sync::Mutex::default(),
         })
     }
 
@@ -114,7 +117,16 @@ impl Provider {
             );
         }
         let value: Value = response.json().await.context("parsing model list")?;
-        Ok(parse_models(&value))
+        let models = parse_models(&value);
+        self.image_capabilities
+            .lock()
+            .unwrap()
+            .extend(models.iter().filter_map(|model| {
+                model
+                    .image_input
+                    .map(|supported| (model.id.clone(), supported))
+            }));
+        Ok(models)
     }
 
     pub async fn complete<F: FnMut(&str)>(
@@ -124,6 +136,14 @@ impl Provider {
         tools: &[ToolDefinition],
         on_text: &mut F,
     ) -> Result<Completion> {
+        if messages.iter().any(|message| {
+            message
+                .blocks
+                .iter()
+                .any(|block| matches!(block, crate::conversation::Block::Image(_)))
+        }) {
+            self.validate_image_input()?;
+        }
         let kind = self.config.kind.unwrap_or_default();
         match kind {
             ProviderKind::OpenAi => openai::complete(self, system, messages, tools, on_text).await,
@@ -134,6 +154,24 @@ impl Provider {
                 responses::complete(self, system, messages, tools, on_text).await
             }
         }
+    }
+
+    pub fn validate_image_input(&self) -> Result<()> {
+        let supported = self.config.image_input.or_else(|| {
+            self.image_capabilities
+                .lock()
+                .unwrap()
+                .get(&self.model)
+                .copied()
+        });
+        if supported == Some(false) {
+            bail!(
+                "model '{}' on provider '{}' does not accept image input; choose a vision-capable model or start /new without images",
+                self.model,
+                self.name
+            );
+        }
+        Ok(())
     }
 
     pub(super) fn api_key(&self) -> &str {
@@ -297,7 +335,20 @@ pub(super) fn parse_models(value: &Value) -> Vec<ModelInfo> {
                 .and_then(Value::as_str)
                 .filter(|name| *name != id)
                 .map(str::to_string);
-            Some(ModelInfo { id, name })
+            let image_input = item
+                .pointer("/capabilities/vision")
+                .and_then(Value::as_bool)
+                .or_else(|| item.get("vision").and_then(Value::as_bool))
+                .or_else(|| {
+                    item.pointer("/modalities/input")
+                        .and_then(Value::as_array)
+                        .map(|modalities| modalities.iter().any(|value| value == "image"))
+                });
+            Some(ModelInfo {
+                id,
+                name,
+                image_input,
+            })
         })
         .collect::<Vec<_>>();
     models.sort_by(|a, b| a.id.cmp(&b.id));
@@ -317,6 +368,40 @@ pub(super) fn parse_args(raw: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn catalog_image_capability_is_enforced_without_sending_images() {
+        let router = axum::Router::new().route("/models", axum::routing::get(|| async {
+            axum::Json(serde_json::json!({"data": [{"id": "text-only", "modalities": {"input": ["text"]}}]}))
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let provider = Provider::new(
+            "test".into(),
+            ProviderConfig {
+                base_url: Some(format!("http://{address}")),
+                ..Default::default()
+            },
+            "text-only".into(),
+            ProviderAuth {
+                key: "test".into(),
+                account_id: None,
+            },
+        )
+        .unwrap();
+        assert!(provider.validate_image_input().is_ok());
+        provider.list_models().await.unwrap();
+        assert!(
+            provider
+                .validate_image_input()
+                .unwrap_err()
+                .to_string()
+                .contains("does not accept image input")
+        );
+    }
 
     #[test]
     fn parses_openai_and_anthropic_model_lists() {

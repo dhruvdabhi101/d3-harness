@@ -1572,11 +1572,12 @@ dependencies = [
 
 [[package]]
 name = "oc-harness"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "clap",
  "crossterm",
  "dirs",
@@ -1594,6 +1595,7 @@ dependencies = [
  "tokio",
  "tui-markdown",
  "tui-textarea-2",
+ "unicode-segmentation",
  "unicode-width",
 ]
 

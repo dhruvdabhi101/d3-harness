@@ -73,6 +73,7 @@ pub struct ProviderConfig {
     pub account_id: Option<String>,
     pub model: Option<String>,
     pub max_tokens: Option<u32>,
+    pub image_input: Option<bool>,
     pub headers: BTreeMap<String, String>,
 }
 
@@ -92,6 +93,7 @@ impl ProviderConfig {
             account_id: over.account_id.or(self.account_id),
             model: over.model.or(self.model),
             max_tokens: over.max_tokens.or(self.max_tokens),
+            image_input: over.image_input.or(self.image_input),
             headers: {
                 let mut headers = self.headers;
                 headers.extend(over.headers);
@@ -757,6 +759,7 @@ fn preset(
         },
         model: Some(model.to_string()),
         max_tokens: None,
+        image_input: None,
         headers: BTreeMap::new(),
     }
 }

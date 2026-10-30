@@ -208,7 +208,30 @@ fn build_input(messages: &[Message]) -> Vec<Value> {
     for message in messages {
         match message.role {
             Role::User => {
-                out.push(json!({"role": "user", "content": message.text()}));
+                let content = if message
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, Block::Image(_)))
+                {
+                    Value::Array(
+                        message
+                            .blocks
+                            .iter()
+                            .filter_map(|block| match block {
+                                Block::Text(text) => {
+                                    Some(json!({"type": "input_text", "text": text}))
+                                }
+                                Block::Image(image) => Some(
+                                    json!({"type": "input_image", "image_url": image.data_url()}),
+                                ),
+                                _ => None,
+                            })
+                            .collect(),
+                    )
+                } else {
+                    json!(message.text())
+                };
+                out.push(json!({"role": "user", "content": content}));
             }
             Role::Assistant => {
                 let provider_items = message.blocks.iter().find_map(|block| match block {

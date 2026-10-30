@@ -1,5 +1,6 @@
 pub mod app;
 mod input;
+mod wrap;
 
 use crate::agent::Agent;
 use crate::provider::{ModelInfo, Provider};
@@ -70,8 +71,11 @@ pub enum ToolRequest {
 
 pub enum WorkerCommand {
     Run(String),
+    RunMessage(crate::conversation::Message),
+    Cancel,
     Clear,
     ListSessions,
+    ClipboardImage,
     Resume(Option<String>),
     SetProvider(Box<Provider>, String),
     SetModel(String),
@@ -88,7 +92,9 @@ pub enum LoginEvent {
 
 pub enum WorkerEvent {
     TurnDone(Result<(), String>),
+    TurnCancelled(Result<(), String>),
     Models(Result<Vec<ModelInfo>, String>),
+    ClipboardImage(Result<crate::image::ClipboardContent, String>),
     Sessions(Result<Vec<crate::session::SessionSummary>, String>),
     Resumed(Result<Vec<crate::conversation::Message>, String>),
 }
@@ -259,7 +265,13 @@ pub async fn run(agent: Agent, setup: TuiSetup, info: TuiInfo) -> Result<()> {
             }
             Some(request) = request_rx.recv() => app.handle_tool_request(request),
             Some(notice) = notice_rx.recv() => app.handle_notice(notice),
-            Some(event) = worker_rx.recv() => app.handle_worker_event(event),
+            Some(event) = worker_rx.recv() => {
+                if matches!(event, WorkerEvent::TurnCancelled(_)) {
+                    while let Ok(notice) = notice_rx.try_recv() { app.handle_notice(notice); }
+                    while request_rx.try_recv().is_ok() {}
+                }
+                app.handle_worker_event(event);
+            },
             Some(event) = login_rx.recv() => app.handle_login_event(event),
             _ = ticker.tick() => app.tick(),
         }
@@ -443,16 +455,64 @@ async fn worker(
     mut commands: mpsc::UnboundedReceiver<WorkerCommand>,
     events: mpsc::UnboundedSender<WorkerEvent>,
 ) {
-    while let Some(command) = commands.recv().await {
-        match command {
-            WorkerCommand::Run(text) => {
-                let result = agent
-                    .run_turn(&text)
+    let mut pending = std::collections::VecDeque::new();
+    loop {
+        let command = match pending.pop_front() {
+            Some(command) => command,
+            None => match commands.recv().await {
+                Some(command) => command,
+                None => break,
+            },
+        };
+        let message = match command {
+            WorkerCommand::Run(text) => Some(crate::conversation::Message::user(text)),
+            WorkerCommand::RunMessage(message) => Some(message),
+            command => {
+                pending.push_front(command);
+                None
+            }
+        };
+        if let Some(message) = message {
+            let cancelled;
+            let mut quit = false;
+            {
+                let turn = agent.run_message(message);
+                tokio::pin!(turn);
+                loop {
+                    tokio::select! {
+                        biased;
+                        command = commands.recv() => match command {
+                            Some(WorkerCommand::Cancel) => { cancelled = true; break; }
+                            Some(WorkerCommand::Quit) | None => { cancelled = true; quit = true; break; }
+                            Some(command) => pending.push_back(command),
+                        },
+                        result = &mut turn => {
+                            let _ = events.send(WorkerEvent::TurnDone(result.map_err(|error| format!("{error:#}"))));
+                            cancelled = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            if cancelled {
+                let result = agent.cancel_turn().map_err(|error| format!("{error:#}"));
+                let _ = events.send(WorkerEvent::TurnCancelled(result));
+            }
+            if quit {
+                break;
+            }
+            continue;
+        }
+        match pending.pop_front().unwrap() {
+            WorkerCommand::Run(_) | WorkerCommand::RunMessage(_) => unreachable!(),
+            WorkerCommand::Cancel => {}
+            WorkerCommand::Clear => agent.clear(),
+            WorkerCommand::ClipboardImage => {
+                let result = crate::image::clipboard_content()
                     .await
                     .map_err(|error| format!("{error:#}"));
-                let _ = events.send(WorkerEvent::TurnDone(result));
+                let _ = events.send(WorkerEvent::ClipboardImage(result));
             }
-            WorkerCommand::Clear => agent.clear(),
             WorkerCommand::ListSessions => {
                 let result = agent.list_sessions().map_err(|error| format!("{error:#}"));
                 let _ = events.send(WorkerEvent::Sessions(result));

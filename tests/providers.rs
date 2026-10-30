@@ -387,3 +387,95 @@ async fn chatgpt_handler(headers: axum::http::HeaderMap, body: String) -> Respon
     ]
     .concat())
 }
+
+#[tokio::test]
+async fn image_attachments_use_each_provider_wire_format_and_survive_resume() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let png = STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=").unwrap();
+    for (kind, endpoint) in [
+        ("openai", "/v1/chat/completions"),
+        ("anthropic", "/v1/messages"),
+        ("responses", "/v1/responses"),
+    ] {
+        let state = Arc::new(MockState::default());
+        let app = Router::new()
+            .route(endpoint, post(image_handler))
+            .with_state(state.clone());
+        let base = spawn_server(app).await;
+        let project = tempfile::tempdir().unwrap();
+        let provider = oc_harness::provider::Provider::new(
+            "mock".into(),
+            serde_json::from_value(json!({"type": kind, "base_url": format!("{base}/v1")}))
+                .unwrap(),
+            "vision-test".into(),
+            oc_harness::provider::ProviderAuth {
+                key: "test".into(),
+                account_id: None,
+            },
+        )
+        .unwrap();
+        let image = project.path().join("screen.png");
+        std::fs::write(&image, &png).unwrap();
+        let mut session = oc_harness::session::Session::new(project.path()).unwrap();
+        let mut message = oc_harness::conversation::Message::user("describe the image");
+        message.blocks.push(oc_harness::conversation::Block::Image(
+            oc_harness::image::ImageAttachment::from_path(&image).unwrap(),
+        ));
+        session.save(&[message]).unwrap();
+        std::fs::remove_file(&image).unwrap();
+        for _ in 0..2 {
+            let messages = session.resume_latest().unwrap();
+            provider
+                .complete("", &messages, &[], &mut |_| {})
+                .await
+                .unwrap();
+        }
+        let bodies = state.bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 2);
+        for body in bodies.iter() {
+            let messages = body
+                .get("messages")
+                .or_else(|| body.get("input"))
+                .unwrap()
+                .as_array()
+                .unwrap();
+            let content = messages
+                .iter()
+                .find(|message| message["role"] == "user")
+                .unwrap()["content"]
+                .as_array()
+                .unwrap();
+            let image = content
+                .iter()
+                .find(|block| block["type"] != "text" && block["type"] != "input_text")
+                .unwrap();
+            match kind {
+                "openai" => assert_eq!(
+                    image["image_url"]["url"],
+                    format!("data:image/png;base64,{}", STANDARD.encode(&png))
+                ),
+                "responses" => assert_eq!(
+                    image["image_url"],
+                    format!("data:image/png;base64,{}", STANDARD.encode(&png))
+                ),
+                _ => {
+                    assert_eq!(image["source"]["media_type"], "image/png");
+                    assert_eq!(image["source"]["data"], STANDARD.encode(&png));
+                }
+            }
+        }
+    }
+}
+
+async fn image_handler(State(state): State<Arc<MockState>>, body: String) -> Response {
+    state
+        .bodies
+        .lock()
+        .unwrap()
+        .push(serde_json::from_str(&body).unwrap());
+    Response::builder().header(header::CONTENT_TYPE, "application/json").body(Body::from(json!({
+        "choices": [{"message": {"content": "An image."}}],
+        "content": [{"type": "text", "text": "An image."}],
+        "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "An image."}]}]
+    }).to_string())).unwrap()
+}

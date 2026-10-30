@@ -170,6 +170,8 @@ Keybindings:
 | `PageUp` / `PageDown` | scroll the conversation |
 | Click a tool row | expand or collapse its output |
 | `Ctrl+U` / `Ctrl+W` | clear line / delete word |
+| `Esc` twice within one second | stop the current turn without quitting |
+| `Ctrl+V` | paste a clipboard image or text |
 | `Ctrl+C` twice | quit while a turn is running |
 | `Ctrl+D` | quit when the input is empty |
 | `Esc` | close palette/modal, deny approval, or clear input |
@@ -186,6 +188,46 @@ The TUI is built on maintained crates:
 - `crossterm` for the terminal backend.
 
 The plain line-based REPL is still available with `--no-tui`.
+
+Press Esc twice within one second to stop an active response or tool wait.
+The app stays open and keeps your draft and completed history. Unfinished tool
+calls receive a stopped result so the conversation can continue. Stopping does
+not undo file edits, external requests, or shell side effects that already
+happened. Shell subprocess descendants may outlive cancellation.
+
+### Attach images
+
+Paste images into the chatbox. The editor detects image-file paths and adds
+them as attachments for your next message. The editor title shows pending image
+names. `/detach` removes them. You can send an image without text.
+
+Paste one or more image-file paths on separate lines, including alongside text.
+Quoted paths with spaces are accepted. Press `Ctrl+V` to paste a PNG image or
+text from the system clipboard. Clipboard image paste
+requires `wl-paste` from wl-clipboard or `xclip` on Linux, or `pngpaste` on macOS.
+Ordinary terminal text paste still inserts text. A clipboard reader has a
+three-second timeout.
+
+Relative attachment paths resolve against the workspace selected by `-C`.
+
+PNG, JPEG, GIF, and WebP attachments have a five-MiB limit per image. The file
+signature determines the format. The provider still validates the image and
+may impose smaller limits or reject a format. Images appear as named attachments
+in chat, not inline terminal previews. Their encoded bytes are stored inside
+private conversation snapshots, so resume works after the source file is moved
+or deleted. Older d3 versions cannot read snapshots containing images.
+
+Images use the native request format for Chat Completions, Anthropic Messages,
+and Responses, including ChatGPT. Select a model that accepts images. When a
+fetched model catalog explicitly reports no image support, d3 rejects the
+request. For providers that omit capability metadata, d3 sends the attachment
+and reports any API rejection. It does not guess support from the model name.
+Set `"image_input": false` in a provider configuration to disable image input
+explicitly. This also blocks requests that replay images from saved history.
+
+Long chat lines use hanging indentation. Wrapped bullet and numbered-list text
+stays under the text after the marker. Other indented lines retain their starting
+column. Markdown styles and Unicode graphemes are preserved across wrapping.
 
 ### Customize the UI
 

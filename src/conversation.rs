@@ -19,6 +19,7 @@ pub struct ToolCall {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Block {
     Text(String),
+    Image(crate::image::ImageAttachment),
     ToolCall(ToolCall),
     ToolResult {
         tool_call_id: String,

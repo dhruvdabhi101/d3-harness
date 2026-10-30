@@ -59,6 +59,7 @@ pub struct App {
     model: String,
     items: Vec<Item>,
     input: TextArea<'static>,
+    attachments: Vec<crate::image::ImageAttachment>,
     palette: Option<Palette>,
     modal: Option<Modal>,
     approval: Option<ApprovalPrompt>,
@@ -71,6 +72,7 @@ pub struct App {
     spinner: usize,
     status: String,
     ctrl_c_pending: bool,
+    escape_pending: Option<std::time::Instant>,
     tool_hits: Vec<(Rect, usize)>,
     messages: usize,
     input_tokens: u64,
@@ -173,6 +175,14 @@ struct CommandSpec {
 
 const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
+        name: "/paste-image",
+        description: "paste clipboard image or text",
+    },
+    CommandSpec {
+        name: "/detach",
+        description: "remove pending image attachments",
+    },
+    CommandSpec {
         name: "/resume",
         description: "choose a saved conversation in this project",
     },
@@ -253,6 +263,7 @@ impl App {
             model,
             items: Vec::new(),
             input: TextArea::default(),
+            attachments: Vec::new(),
             palette: None,
             modal: None,
             approval: None,
@@ -265,6 +276,7 @@ impl App {
             spinner: 0,
             status: "ready".to_string(),
             ctrl_c_pending: false,
+            escape_pending: None,
             tool_hits: Vec::new(),
             messages: 0,
             input_tokens: 0,
@@ -306,6 +318,10 @@ impl App {
                             streaming: false,
                         });
                     }
+                    Block::Image(image) => self.items.push(Item::Info(format!(
+                        "Image attached: {} ({})",
+                        image.name, image.media_type
+                    ))),
                     Block::ToolCall(call) => self.handle_notice(AgentNotice::ToolCall {
                         id: call.id.clone(),
                         name: call.name.clone(),
@@ -433,8 +449,21 @@ impl App {
         if inner.width == 0 || inner.height == 0 {
             return;
         }
-        let paragraph = Paragraph::new(Text::from(self.chat_lines())).wrap(Wrap { trim: false });
-        let total = paragraph.line_count(inner.width);
+        let mut lines = vec![Line::default()];
+        let mut ranges = Vec::new();
+        for (index, item) in self.items.iter().enumerate() {
+            let start = lines.len();
+            lines.extend(
+                self.item_lines(item)
+                    .into_iter()
+                    .flat_map(|line| super::wrap::wrap_line(line, inner.width)),
+            );
+            if matches!(item, Item::Tool { .. }) {
+                ranges.push((start..lines.len(), index));
+            }
+        }
+        let total = lines.len();
+        let paragraph = Paragraph::new(Text::from(lines));
         self.max_scroll = total
             .saturating_sub(inner.height as usize)
             .try_into()
@@ -445,29 +474,20 @@ impl App {
             self.scroll = self.scroll.min(self.max_scroll);
         }
         self.tool_hits.clear();
-        let mut start = 1usize;
-        for (index, item) in self.items.iter().enumerate() {
-            let item_lines = self.item_lines(item);
-            let end = start
-                + Paragraph::new(Text::from(item_lines))
-                    .wrap(Wrap { trim: false })
-                    .line_count(inner.width);
-            if matches!(item, Item::Tool { .. }) {
-                let top = start.max(self.scroll as usize);
-                let bottom = end.min(self.scroll as usize + inner.height as usize);
-                if bottom > top {
-                    self.tool_hits.push((
-                        Rect::new(
-                            inner.x,
-                            inner.y + (top - self.scroll as usize) as u16,
-                            inner.width,
-                            (bottom - top) as u16,
-                        ),
-                        index,
-                    ));
-                }
+        for (range, index) in ranges {
+            let top = range.start.max(self.scroll as usize);
+            let bottom = range.end.min(self.scroll as usize + inner.height as usize);
+            if bottom > top {
+                self.tool_hits.push((
+                    Rect::new(
+                        inner.x,
+                        inner.y + (top - self.scroll as usize) as u16,
+                        inner.width,
+                        (bottom - top) as u16,
+                    ),
+                    index,
+                ));
             }
-            start = end;
         }
         let paragraph = paragraph.scroll((self.scroll, 0));
         frame.render_widget(paragraph, inner);
@@ -550,9 +570,18 @@ impl App {
         let focused = !self.busy && self.modal.is_none() && self.approval.is_none();
         let border = if focused { ACCENT } else { ACCENT_DIM };
         let title = if self.busy {
-            " message · working "
+            " message · working ".to_string()
+        } else if !self.attachments.is_empty() {
+            format!(
+                " message · images: {} · /detach to remove ",
+                self.attachments
+                    .iter()
+                    .map(|image| image.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         } else {
-            " message "
+            " message ".to_string()
         };
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
@@ -794,14 +823,6 @@ impl App {
         );
     }
 
-    fn chat_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![Line::default()];
-        for item in &self.items {
-            lines.extend(self.item_lines(item));
-        }
-        lines
-    }
-
     fn item_lines(&self, item: &Item) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
         match item {
@@ -944,9 +965,8 @@ impl App {
             Event::Paste(text) => {
                 if let Some(Modal::Ask { input, .. }) = &mut self.modal {
                     input.insert_str(&text);
-                } else {
-                    self.input.insert_str(&text);
-                    self.refresh_palette();
+                } else if self.modal.is_none() && self.approval.is_none() {
+                    self.paste_chat(&text);
                 }
             }
             _ => {}
@@ -966,6 +986,25 @@ impl App {
             return;
         }
         self.ctrl_c_pending = false;
+
+        if key.code == KeyCode::Esc && self.busy {
+            let now = std::time::Instant::now();
+            if self.escape_pending.is_some_and(|previous| {
+                now.duration_since(previous) <= std::time::Duration::from_secs(1)
+            }) {
+                self.escape_pending = None;
+                self.status = "stopping".to_string();
+                let _ = self.commands.send(WorkerCommand::Cancel);
+                return;
+            }
+            self.escape_pending = Some(now);
+            self.status = "press Esc again to stop".to_string();
+            if self.approval.is_none() && self.modal.is_none() && self.palette.is_none() {
+                return;
+            }
+        } else {
+            self.escape_pending = None;
+        }
 
         if self.approval.is_some() {
             self.handle_approval_key(key);
@@ -993,6 +1032,7 @@ impl App {
                     self.input.input(key);
                     self.refresh_palette();
                 }
+                KeyCode::Char('v') => self.attach_clipboard_image(),
                 KeyCode::Char('d') => {
                     if self.input.is_empty() {
                         self.should_quit = true;
@@ -1328,7 +1368,7 @@ impl App {
 
     fn submit(&mut self) {
         let text = self.input_text().trim().to_string();
-        if text.is_empty() {
+        if text.is_empty() && self.attachments.is_empty() {
             return;
         }
         if !self.connected && !text.starts_with('/') {
@@ -1353,7 +1393,21 @@ impl App {
         self.busy = true;
         self.status = "thinking".to_string();
         self.auto_scroll = true;
-        let _ = self.commands.send(WorkerCommand::Run(text));
+        if self.attachments.is_empty() {
+            let _ = self.commands.send(WorkerCommand::Run(text));
+        } else {
+            let mut message = crate::conversation::Message::user(text);
+            for image in self.attachments.drain(..) {
+                self.items.push(Item::Info(format!(
+                    "Image attached: {} ({})",
+                    image.name, image.media_type
+                )));
+                message
+                    .blocks
+                    .push(crate::conversation::Block::Image(image));
+            }
+            let _ = self.commands.send(WorkerCommand::RunMessage(message));
+        }
     }
 
     fn run_command(&mut self, text: &str) {
@@ -1361,6 +1415,8 @@ impl App {
         let command = parts.next().unwrap_or("");
         let argument = parts.next().unwrap_or("").trim();
         match command {
+            "/paste-image" => self.attach_clipboard_image(),
+            "/detach" => { self.attachments.clear(); self.push_info("Pending images removed."); }
             "/help" => self.push_info(help_text()),
             "/ui" => self.push_info("Customize ui in harness.json or ~/.config/harness/harness.json. Settings: accent, user_background, assistant_background (#RRGGBB), tool_output_expanded (boolean), editor_max_height (1..20). Restart to apply."),
             "/resume" | "/continue" => {
@@ -1378,6 +1434,7 @@ impl App {
                     return;
                 }
                 self.items.clear();
+                self.attachments.clear();
                 self.history.clear();
                 self.history_pos = None;
                 self.messages = 0;
@@ -1466,6 +1523,54 @@ impl App {
             "/exit" | "/quit" => self.should_quit = true,
             other => self.push_warn(format!("unknown command {other}; try /help")),
         }
+    }
+
+    fn paste_chat(&mut self, text: &str) {
+        let mut remaining = Vec::new();
+        for line in text.lines() {
+            let path_text = line.trim().trim_matches(['"', '\'']);
+            let path = PathBuf::from(path_text.strip_prefix("file://").unwrap_or(path_text));
+            let path = if path.is_absolute() {
+                path
+            } else {
+                self.info.workspace.join(path)
+            };
+            if path.is_file()
+                && path.extension().is_some_and(|ext| {
+                    matches!(
+                        ext.to_string_lossy().to_ascii_lowercase().as_str(),
+                        "png" | "jpg" | "jpeg" | "gif" | "webp"
+                    )
+                })
+            {
+                self.attach_image(&path);
+            } else {
+                remaining.push(line);
+            }
+        }
+        if !remaining.is_empty() {
+            let mut remaining = remaining.join("\n");
+            if text.ends_with('\n') {
+                remaining.push('\n');
+            }
+            self.input.insert_str(&remaining);
+            self.refresh_palette();
+        }
+    }
+
+    fn attach_image(&mut self, path: &std::path::Path) {
+        match crate::image::ImageAttachment::from_path(path) {
+            Ok(image) => self.attachments.push(image),
+            Err(error) => self.push_warn(format!("Could not attach image: {error:#}")),
+        }
+    }
+
+    fn attach_clipboard_image(&mut self) {
+        if self.busy {
+            self.push_warn("wait for the current turn to finish before pasting an image");
+            return;
+        }
+        let _ = self.commands.send(WorkerCommand::ClipboardImage);
     }
 
     fn set_model(&mut self, model: &str) {
@@ -1858,6 +1963,7 @@ impl App {
             WorkerEvent::TurnDone(result) => {
                 self.busy = false;
                 self.ctrl_c_pending = false;
+                self.escape_pending = None;
                 self.status = "ready".to_string();
                 if let Err(error) = result {
                     self.items.push(Item::Error(error));
@@ -1866,6 +1972,34 @@ impl App {
                     *streaming = false;
                 }
             }
+            WorkerEvent::TurnCancelled(result) => {
+                self.busy = false;
+                self.ctrl_c_pending = false;
+                self.escape_pending = None;
+                self.approval = None;
+                self.modal = None;
+                self.status = "ready".to_string();
+                for item in &mut self.items {
+                    match item {
+                        Item::Assistant { streaming, .. } => *streaming = false,
+                        Item::Tool { state, summary, .. } if *state == ToolState::Running => {
+                            *state = ToolState::Error;
+                            *summary =
+                                "Stopped by the user; inspect effects before retrying.".into();
+                        }
+                        _ => {}
+                    }
+                }
+                self.push_info("Stopped. Completed conversation history is preserved. Tool changes are not undone.");
+                if let Err(error) = result {
+                    self.items.push(Item::Error(error));
+                }
+            }
+            WorkerEvent::ClipboardImage(result) => match result {
+                Ok(crate::image::ClipboardContent::Image(image)) => self.attachments.push(image),
+                Ok(crate::image::ClipboardContent::Text(text)) => self.paste_chat(&text),
+                Err(error) => self.push_warn(format!("Could not paste clipboard: {error}")),
+            },
             WorkerEvent::Sessions(result) => {
                 self.busy = false;
                 self.status = "ready".to_string();
@@ -2108,6 +2242,8 @@ fn help_text() -> String {
         "Commands",
         "/help              show this help",
         "/new               start a fresh conversation",
+        "/paste-image       attach clipboard image (Ctrl+V)",
+        "/detach            remove pending images",
         "/model [id]        show or change the model",
         "/models            fetch and choose from the provider catalog",
         "/provider          show the current provider",
@@ -2129,6 +2265,7 @@ fn help_text() -> String {
         "/ui                show customization settings",
         "Click tool row     expand or collapse output",
         "PageUp/PageDown    scroll the conversation",
+        "Esc twice          stop the current turn without quitting",
         "Ctrl+C twice       quit while a turn is running",
     ]
     .join("\n")
@@ -2174,6 +2311,113 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    #[test]
+    fn double_escape_stops_turn_without_quitting_or_clearing_draft() {
+        let (mut app, mut rx) = app();
+        app.busy = true;
+        app.set_input_text("next request");
+        key(&mut app, KeyCode::Esc);
+        assert!(rx.try_recv().is_err());
+        key(&mut app, KeyCode::Esc);
+        assert!(matches!(rx.try_recv(), Ok(WorkerCommand::Cancel)));
+        assert!(!app.should_quit);
+        assert_eq!(app.input_text(), "next request");
+        app.handle_worker_event(WorkerEvent::TurnCancelled(Ok(())));
+        assert!(!app.busy);
+        assert!(text(&mut app).contains("Stopped."));
+    }
+
+    #[test]
+    fn escape_confirmation_expires_and_other_keys_reset_it() {
+        let (mut app, mut rx) = app();
+        app.busy = true;
+        app.escape_pending = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+        key(&mut app, KeyCode::Esc);
+        assert!(rx.try_recv().is_err());
+        key(&mut app, KeyCode::Char('x'));
+        key(&mut app, KeyCode::Esc);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn mixed_paste_detects_images_without_an_attach_command() {
+        let (mut app, _rx) = app();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("screen.png");
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\nfixture").unwrap();
+        app.handle_event(Event::Paste(format!("explain this\n{}\n", path.display())));
+        assert_eq!(app.input_text(), "explain this\n");
+        assert_eq!(app.attachments.len(), 1);
+        assert!(!COMMANDS.iter().any(|command| command.name == "/attach"));
+        app.handle_worker_event(WorkerEvent::ClipboardImage(Ok(
+            crate::image::ClipboardContent::Text("more text".into()),
+        )));
+        assert_eq!(app.input_text(), "explain this\nmore text");
+    }
+
+    #[test]
+    fn image_path_paste_attaches_and_image_only_message_can_be_sent() {
+        let (mut app, mut rx) = app();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("screen shot.png");
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\nfixture").unwrap();
+        app.handle_event(Event::Paste(format!("'{}'", path.display())));
+        assert!(app.input.is_empty());
+        assert_eq!(app.attachments.len(), 1);
+        assert!(text(&mut app).contains("screen shot.png"));
+        app.submit();
+        let WorkerCommand::RunMessage(message) = rx.try_recv().unwrap() else {
+            panic!("expected image message")
+        };
+        assert!(
+            matches!(&message.blocks[1], crate::conversation::Block::Image(image) if image.name == "screen shot.png")
+        );
+        assert!(app.attachments.is_empty());
+        app.restore_messages(&[message]);
+        assert!(text(&mut app).contains("Image attached: screen shot.png"));
+    }
+
+    #[test]
+    fn invalid_image_does_not_clear_input_and_detach_removes_pending_images() {
+        let (mut app, _rx) = app();
+        app.set_input_text("keep this request");
+        app.attach_image(std::path::Path::new("/missing-image.png"));
+        assert_eq!(app.input_text(), "keep this request");
+        app.handle_worker_event(WorkerEvent::ClipboardImage(Ok(
+            crate::image::ClipboardContent::Image(
+                crate::image::ImageAttachment::from_bytes(
+                    "clip.png".into(),
+                    b"\x89PNG\r\n\x1a\nfixture",
+                )
+                .unwrap(),
+            ),
+        )));
+        assert_eq!(app.attachments.len(), 1);
+        app.run_command("/detach");
+        assert!(app.attachments.is_empty());
+    }
+
+    #[test]
+    fn wrapped_bullets_keep_text_start_column() {
+        let (mut app, _) = app();
+        app.items.clear();
+        app.items.push(Item::Assistant { text: "- alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon".into(), streaming: false });
+        let mut terminal = Terminal::new(TestBackend::new(40, 30)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..25)
+            .map(|y| (0..40).map(|x| buffer[(x, y)].symbol()).collect())
+            .filter(|line: &String| !line.trim().is_empty())
+            .collect();
+        let first = rows.iter().position(|line| line.contains("alpha")).unwrap();
+        let column = rows[first].chars().position(|ch| ch == 'a').unwrap();
+        assert_eq!(
+            rows[first + 1].chars().position(|ch| !ch.is_whitespace()),
+            Some(column),
+            "{rows:?}"
+        );
     }
 
     #[test]

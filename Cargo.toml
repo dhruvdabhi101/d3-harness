@@ -1,6 +1,6 @@
 [package]
 name = "oc-harness"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "A small, honest CLI coding harness"
 license = "MIT"
@@ -29,6 +29,8 @@ tokio = { version = "1", features = ["full"] }
 tui-markdown = "0.3.12"
 tui-textarea-2 = { version = "0.13.2", default-features = false, features = ["crossterm"] }
 unicode-width = "0.2.3"
+unicode-segmentation = "1"
+base64 = "0.22"
 
 [dev-dependencies]
 axum = "0.8"
