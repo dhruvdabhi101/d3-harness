@@ -27,7 +27,9 @@ release at startup and displays a notice when one is available. The check
 fails silently when offline.
 
 To publish a release, set the version in `Cargo.toml`, update `Cargo.lock`, and
-push a matching tag such as `v0.1.0`. GitHub Actions builds the release assets.
+push a matching tag such as `v0.1.1`. GitHub Actions builds Linux and macOS
+assets for x86-64 and ARM64. The installer requires a published release; a
+local build or an untagged push does not create one.
 
 ## Build
 
@@ -333,7 +335,8 @@ A complete example is in [`harness.example.json`](harness.example.json).
 
 - `shell`: `ask` (default), `allow`, or `deny`.
 - `edit`: `allow` (default), `ask`, or `deny`.
-- `--yes` ignores `ask` and approves everything.
+- `--yes` (also `--skip-approval` or `--auto-approve`) automatically approves
+  `ask` permissions. Explicit `deny` permissions remain in effect.
 - In a non-interactive run, `ask` behaves like `deny`. That is deliberate: a
   command should not be silently approved because stdin is a pipe.
 
@@ -446,7 +449,7 @@ d3 [OPTIONS] [PROMPT]...
       --system-file <PATH>     replace it with a file
   -C, --cwd <DIR>              workspace directory
       --config <PATH>          explicit config file
-  -y, --yes                    auto-approve shell commands and edits
+  -y, --yes, --skip-approval   auto-approve shell commands and edits
       --max-steps <N>          model turns per user message (default 40)
       --dump-context           print prompt, tools, skills, and MCP as JSON
       --list-providers         list providers and exit

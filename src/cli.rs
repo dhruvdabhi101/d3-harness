@@ -37,7 +37,12 @@ pub struct Cli {
     pub config: Option<PathBuf>,
 
     /// Approve shell commands and edits without asking.
-    #[arg(short = 'y', long = "yes", alias = "auto-approve")]
+    #[arg(
+        short = 'y',
+        long = "yes",
+        alias = "auto-approve",
+        visible_alias = "skip-approval"
+    )]
     pub yes: bool,
 
     /// Maximum number of model turns per user message.

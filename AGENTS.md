@@ -31,6 +31,8 @@ Run the binary from source with `cargo run -- <args>` or
 
 ## Rules
 
+- Bump the package version in Cargo.toml and update Cargo.lock for changes. Use
+  an appropriate semantic version increment; release tags must match the version.
 - Keep the harness small. Prefer one clear implementation over a framework.
 - Do not add dependencies without a concrete reason.
 - The default system prompt is a product decision, not filler. Changes to it
