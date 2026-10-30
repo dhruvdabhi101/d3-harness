@@ -274,6 +274,33 @@ impl App {
         app
     }
 
+    pub fn restore_messages(&mut self, messages: &[crate::conversation::Message]) {
+        use crate::conversation::Role;
+        for message in messages {
+            let text = message.text();
+            if text.is_empty() {
+                continue;
+            }
+            match message.role {
+                Role::User => {
+                    self.history.push(text.clone());
+                    self.items.push(Item::User(text));
+                    self.messages += 1;
+                }
+                Role::Assistant => self.items.push(Item::Assistant {
+                    text,
+                    streaming: false,
+                }),
+                Role::Tool => {}
+            }
+        }
+        if !messages.is_empty() {
+            self.push_info(
+                "Resumed saved conversation. Tool results are included in model context.",
+            );
+        }
+    }
+
     pub fn draw(&mut self, frame: &mut Frame) {
         self.dirty = false;
         let area = frame.area();
@@ -397,15 +424,7 @@ impl App {
         if inner.width == 0 || inner.height == 0 {
             return;
         }
-        let mut lines = self.chat_lines();
-        for line in &mut lines {
-            if line.style.bg.is_some() {
-                let width = inner.width as usize;
-                let padding = (width - line.width() % width) % width;
-                line.spans.push(Span::raw(" ".repeat(padding)));
-            }
-        }
-        let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+        let paragraph = Paragraph::new(Text::from(self.chat_lines())).wrap(Wrap { trim: false });
         let total = paragraph.line_count(inner.width);
         self.max_scroll = total
             .saturating_sub(inner.height as usize)
@@ -418,6 +437,18 @@ impl App {
         }
         let paragraph = paragraph.scroll((self.scroll, 0));
         frame.render_widget(paragraph, inner);
+        let buffer = frame.buffer_mut();
+        for y in inner.top()..inner.bottom() {
+            let background = buffer[(inner.left(), y)].bg;
+            if matches!(background, USER_BG | ASSISTANT_BG | CODE_BG) {
+                for x in inner.left()..inner.right() {
+                    let cell = &mut buffer[(x, y)];
+                    if cell.bg == Color::Reset {
+                        cell.bg = background;
+                    }
+                }
+            }
+        }
 
         if total > inner.height as usize && area.width > 6 {
             let bar_area = Rect {
@@ -1021,7 +1052,10 @@ impl App {
                 }
                 KeyCode::Up => self.scroll_up(4),
                 KeyCode::Down => self.scroll_down(4),
-                KeyCode::Home => self.scroll = 0,
+                KeyCode::Home => {
+                    self.auto_scroll = false;
+                    self.scroll = 0;
+                }
                 KeyCode::End => self.scroll_to_bottom(),
                 KeyCode::Char('j') | KeyCode::Enter => {
                     self.input.insert_str("\n");
@@ -2243,6 +2277,57 @@ mod tests {
         key(&mut app, KeyCode::Esc);
         let screen = text(&mut app);
         assert!(!screen.contains("fetch and choose"), "{screen}");
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_conversation_without_recalling_input() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+
+        let (mut app, _rx) = app();
+        app.history.push("old input".into());
+        app.items.push(Item::Assistant {
+            text: (0..40).map(|i| format!("answer line {i}\n")).collect(),
+            streaming: false,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let bottom = app.scroll;
+        assert!(bottom > 0);
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        }));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(app.scroll < bottom);
+        assert!(app.input_text().is_empty());
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Home,
+            KeyModifiers::CONTROL,
+        )));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(app.scroll, 0);
+    }
+
+    #[test]
+    fn assistant_background_fills_wrapped_rows() {
+        let (mut app, _rx) = app();
+        app.items.push(Item::Assistant {
+            text: format!("{} ending", "word ".repeat(30)),
+            streaming: true,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        for y in 0..20 {
+            let has_assistant = (2..56).any(|x| buffer[(x, y)].bg == ASSISTANT_BG);
+            if has_assistant {
+                for x in 2..56 {
+                    assert_eq!(buffer[(x, y)].bg, ASSISTANT_BG, "cell {x},{y}");
+                }
+            }
+        }
     }
 
     #[test]

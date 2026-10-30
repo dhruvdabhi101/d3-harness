@@ -14,6 +14,7 @@ pub struct Agent {
     max_steps: usize,
     usage: Usage,
     ui: Arc<dyn AgentUi>,
+    session: Option<crate::session::Session>,
 }
 
 impl Agent {
@@ -35,7 +36,24 @@ impl Agent {
             max_steps,
             usage: Usage::default(),
             ui,
+            session: None,
         }
+    }
+
+    pub fn set_session(&mut self, session: crate::session::Session, messages: Vec<Message>) {
+        self.session = Some(session);
+        self.messages = messages;
+    }
+
+    pub fn messages(&self) -> &[Message] {
+        &self.messages
+    }
+
+    fn save(&mut self) -> Result<()> {
+        if let Some(session) = &mut self.session {
+            session.save(&self.messages)?;
+        }
+        Ok(())
     }
 
     pub fn model(&self) -> &str {
@@ -69,6 +87,9 @@ impl Agent {
     pub fn clear(&mut self) {
         self.messages.clear();
         self.usage = Usage::default();
+        if let Some(session) = &mut self.session {
+            session.new_conversation();
+        }
     }
 
     pub fn message_count(&self) -> usize {
@@ -107,6 +128,7 @@ impl Agent {
 
     pub async fn run_turn(&mut self, input: &str) -> Result<()> {
         self.messages.push(Message::user(input));
+        self.save()?;
         let mut turn_usage = Usage::default();
 
         for _step in 0..self.max_steps {
@@ -134,6 +156,7 @@ impl Agent {
                 } else {
                     self.ui.warn("the model returned no text and no tool calls");
                 }
+                self.save()?;
                 self.usage.input_tokens += turn_usage.input_tokens;
                 self.usage.output_tokens += turn_usage.output_tokens;
                 self.ui
@@ -174,6 +197,7 @@ impl Agent {
                     outcome.is_error,
                 ));
             }
+            self.save()?;
         }
 
         self.usage.input_tokens += turn_usage.input_tokens;

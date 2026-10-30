@@ -75,6 +75,7 @@ async fn agent_loop_writes_file_and_keeps_context() {
         .arg(project.path())
         .arg("create hello.txt")
         .env("MOCK_KEY", "test-key")
+        .env("XDG_DATA_HOME", project.path().join("data"))
         .env_remove("HARNESS_API_KEY")
         .stdin(Stdio::null())
         .output()
@@ -93,8 +94,90 @@ async fn agent_loop_writes_file_and_keeps_context() {
         "hello from mock\n"
     );
 
+    let resumed = Command::new(env!("CARGO_BIN_EXE_d3"))
+        .arg("--continue")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("-C")
+        .arg(project.path())
+        .arg("what did you create?")
+        .env("MOCK_KEY", "test-key")
+        .env("XDG_DATA_HOME", project.path().join("data"))
+        .env_remove("HARNESS_API_KEY")
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+
+    let listed = Command::new(env!("CARGO_BIN_EXE_d3"))
+        .arg("--list-sessions")
+        .arg("-C")
+        .arg(project.path())
+        .env("XDG_DATA_HOME", project.path().join("data"))
+        .output()
+        .await
+        .unwrap();
+    assert!(listed.status.success());
+    let listing = String::from_utf8(listed.stdout).unwrap();
+    let lines: Vec<_> = listing.lines().collect();
+    assert_eq!(lines.len(), 2, "{listing}");
+    assert!(lines.iter().all(|line| line.contains("create hello.txt")));
+    let original_id = lines[1].split('\t').next().unwrap();
+    let selected = Command::new(env!("CARGO_BIN_EXE_d3"))
+        .args(["--resume", original_id, "--config"])
+        .arg(&config_path)
+        .arg("-C")
+        .arg(project.path())
+        .arg("continue the original")
+        .env("MOCK_KEY", "test-key")
+        .env("XDG_DATA_HOME", project.path().join("data"))
+        .env_remove("HARNESS_API_KEY")
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        selected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&selected.stderr)
+    );
+
     let bodies = state.bodies.lock().unwrap();
-    assert_eq!(bodies.len(), 2, "expected two model turns");
+    assert_eq!(bodies.len(), 4, "expected four model turns");
+    let selected_messages = bodies[3]["messages"].as_array().unwrap();
+    assert!(selected_messages.iter().any(|m| m["role"] == "tool"));
+    assert!(
+        !selected_messages
+            .iter()
+            .any(|m| m["content"] == "what did you create?")
+    );
+    assert!(
+        selected_messages
+            .iter()
+            .any(|m| m["content"] == "continue the original")
+    );
+    let resumed_messages = bodies[2]["messages"].as_array().unwrap();
+    assert!(
+        resumed_messages
+            .iter()
+            .any(|m| m["role"] == "tool"
+                && m["content"].as_str().unwrap_or("").contains("hello.txt"))
+    );
+    assert!(
+        resumed_messages
+            .iter()
+            .any(|m| m["role"] == "user" && m["content"] == "create hello.txt")
+    );
+    assert!(
+        resumed_messages
+            .iter()
+            .any(|m| m["role"] == "user" && m["content"] == "what did you create?")
+    );
     let system = bodies[0]["messages"][0]["content"].as_str().unwrap();
     assert!(system.contains("PROJECT RULE: use tabs"));
     assert!(system.contains("Reviews code for platypus bugs"));

@@ -15,8 +15,10 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 base="https://github.com/$repo/releases/latest/download"
 asset="d3-$target.tar.gz"
-curl -fsSL "$base/$asset" -o "$tmp/$asset"
-curl -fsSL "$base/$asset.sha256" -o "$tmp/$asset.sha256"
+printf 'Downloading %s...\n' "$asset" >&2
+curl -fSL --connect-timeout 15 --max-time 300 "$base/$asset" -o "$tmp/$asset" </dev/null
+printf 'Downloading checksum...\n' >&2
+curl -fSL --connect-timeout 15 --max-time 60 "$base/$asset.sha256" -o "$tmp/$asset.sha256" </dev/null
 (cd "$tmp" && $hash -c "$asset.sha256")
 tar -xzf "$tmp/$asset" -C "$tmp"
 bin_dir=${D3_INSTALL_DIR:-"$HOME/.local/bin"}

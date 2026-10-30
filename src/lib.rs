@@ -6,6 +6,7 @@ pub mod mcp;
 pub mod prompt;
 pub mod provider;
 pub mod repl;
+pub mod session;
 pub mod skills;
 pub mod tools;
 pub mod tui;
@@ -34,6 +35,14 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
         .with_context(|| format!("opening workspace {}", cwd.display()))?;
     std::env::set_current_dir(&cwd)
         .with_context(|| format!("switching to workspace {}", cwd.display()))?;
+
+    if cli.list_sessions {
+        let sessions = session::Session::new(&cwd)?.list()?;
+        for session in sessions {
+            println!("{}\t{}", session.id, session.title);
+        }
+        return Ok(());
+    }
 
     let mut cfg = Config::load(cli.config.as_deref(), &cwd)?;
     if let Some(provider) = &cli.provider {
@@ -192,7 +201,15 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
     }
 
     let prompt_text = prompt_from_args(&cli.prompt, interactive)?;
-    let max_steps = cfg.max_steps.unwrap_or(40);
+    let max_steps = cfg.max_steps.unwrap_or(1000);
+    let mut session = session::Session::new(&cwd)?;
+    let messages = if let Some(id) = &cli.resume {
+        session.resume(if id.is_empty() { None } else { Some(id) })?
+    } else if cli.r#continue {
+        session.resume_latest()?
+    } else {
+        Vec::new()
+    };
 
     if let Some(text) = prompt_text.filter(|text| !text.trim().is_empty()) {
         let (auth, had_key) = provider_auth(&provider_name, &provider_cfg, interactive)?;
@@ -237,6 +254,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             max_steps,
             Arc::new(ConsoleAgentUi),
         );
+        agent.set_session(session, messages);
         agent.run_turn(text.trim()).await?;
         return Ok(());
     }
@@ -293,7 +311,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             connected,
             providers: provider_choices(&cfg),
         };
-        let agent = agent::Agent::new(
+        let mut agent = agent::Agent::new(
             provider,
             model,
             core,
@@ -302,6 +320,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             max_steps,
             setup.agent_ui.clone(),
         );
+        agent.set_session(session, messages);
         return tui::run(agent, setup, info).await;
     }
 
@@ -333,6 +352,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
         max_steps,
         Arc::new(ConsoleAgentUi),
     );
+    agent.set_session(session, messages);
     repl::run(&mut agent).await?;
     Ok(())
 }

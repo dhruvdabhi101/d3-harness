@@ -31,6 +31,29 @@ push a matching tag such as `v0.1.1`. GitHub Actions builds Linux and macOS
 assets for x86-64 and ARM64. The installer requires a published release; a
 local build or an untagged push does not create one.
 
+## Resume a conversation
+
+Conversations are saved automatically in the local data directory under
+`d3/sessions`. Run `d3 --continue` (or `d3 -c`) in the same workspace to
+resume its most recently updated conversation. Add a prompt after the options
+to continue in one-shot mode, for example `d3 -c "continue the task"`.
+To select an older conversation, run `d3 --list-sessions`, then pass its ID to
+`d3 --resume <ID>`. Add a prompt after the ID for one-shot use. Bare `--resume`
+continues the latest conversation. `/new` starts a separate conversation
+without deleting the previous one. Each resumed process saves a separate
+continuation, so concurrent runs do not overwrite one another. `--continue`
+selects the most recently updated continuation.
+
+Saved conversations contain prompts, responses, and tool results, which may
+include sensitive data. The session directory and files are private to your
+user on Unix. Delete the files to remove saved conversations. The current
+provider, model, permissions, and system prompt are loaded again on restart;
+use the same provider when resuming provider-specific tool history.
+
+If the process stops during a tool call, the last complete checkpoint is
+resumed. The tool may already have changed files or run commands, so inspect
+those effects before retrying.
+
 ## Build
 
 ```bash
@@ -450,7 +473,10 @@ d3 [OPTIONS] [PROMPT]...
   -C, --cwd <DIR>              workspace directory
       --config <PATH>          explicit config file
   -y, --yes, --skip-approval   auto-approve shell commands and edits
-      --max-steps <N>          model turns per user message (default 40)
+  -c, --continue               resume the latest workspace conversation
+      --list-sessions          list saved workspace conversations
+      --resume [ID]            resume a conversation by ID, or the latest
+      --max-steps <N>          model turns per user message (default 1000)
       --dump-context           print prompt, tools, skills, and MCP as JSON
       --list-providers         list providers and exit
       --list-models            fetch the provider's models and exit
@@ -544,6 +570,6 @@ Default prompt principles:
 - verify with real commands and report failures honestly;
 - keep the user oriented so a mistake is visible while it is still cheap to fix.
 
-Not included yet: session persistence/resume, context compaction, image input,
-subagents, LSP integration, and sandboxing. Those are deliberate omissions for
+Not included yet: context compaction, image input, subagents, LSP integration,
+and sandboxing. Those are deliberate omissions for
 a first version, not hidden claims.

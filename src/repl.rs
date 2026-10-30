@@ -3,6 +3,20 @@ use crate::ui;
 use anyhow::Result;
 
 pub async fn run(agent: &mut Agent) -> Result<()> {
+    if !agent.messages().is_empty() {
+        for message in agent.messages() {
+            let text = message.text();
+            if text.is_empty() {
+                continue;
+            }
+            match message.role {
+                crate::conversation::Role::User => eprintln!("{} {text}", ui::bold("›")),
+                crate::conversation::Role::Assistant => eprintln!("{text}"),
+                crate::conversation::Role::Tool => {}
+            }
+        }
+        ui::info("resumed saved conversation");
+    }
     loop {
         let Some(line) = ui::read_line(&format!("{} ", ui::bold("›")))? else {
             eprintln!();

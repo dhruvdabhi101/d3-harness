@@ -9,7 +9,9 @@ use app::{App, TuiInfo};
 use async_trait::async_trait;
 use crossterm::{
     cursor::Show,
-    event::{self, DisableBracketedPaste, EnableBracketedPaste},
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -201,6 +203,7 @@ impl ToolUi for TuiToolUi {
 }
 
 pub async fn run(agent: Agent, setup: TuiSetup, info: TuiInfo) -> Result<()> {
+    let messages = agent.messages().to_vec();
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (worker_tx, mut worker_rx) = mpsc::unbounded_channel();
 
@@ -223,6 +226,7 @@ pub async fn run(agent: Agent, setup: TuiSetup, info: TuiInfo) -> Result<()> {
     } = setup;
     let (login_tx, mut login_rx) = mpsc::unbounded_channel();
     let mut app = App::new(info, command_tx, login_tx);
+    app.restore_messages(&messages);
     let mut ticker = tokio::time::interval(Duration::from_millis(90));
 
     loop {
@@ -459,7 +463,13 @@ struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(stdout(), LeaveAlternateScreen, DisableBracketedPaste, Show);
+        let _ = execute!(
+            stdout(),
+            LeaveAlternateScreen,
+            DisableBracketedPaste,
+            DisableMouseCapture,
+            Show
+        );
     }
 }
 
@@ -468,8 +478,13 @@ impl TuiTerminal {
         enable_raw_mode().context("enabling raw mode")?;
         let guard = TerminalGuard;
         let mut out = stdout();
-        execute!(out, EnterAlternateScreen, EnableBracketedPaste)
-            .context("entering the alternate screen")?;
+        execute!(
+            out,
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            EnableMouseCapture
+        )
+        .context("entering the alternate screen")?;
         let backend = CrosstermBackend::new(out);
         let terminal = Terminal::new(backend)?;
         Ok(Self {

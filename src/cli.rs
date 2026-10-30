@@ -45,7 +45,19 @@ pub struct Cli {
     )]
     pub yes: bool,
 
-    /// Maximum number of model turns per user message.
+    /// Continue the latest saved conversation in this workspace.
+    #[arg(short = 'c', long = "continue", conflicts_with = "resume")]
+    pub r#continue: bool,
+
+    /// Resume a session by ID, or the latest session when no ID is given.
+    #[arg(long, value_name = "ID", num_args = 0..=1, default_missing_value = "")]
+    pub resume: Option<String>,
+
+    /// List saved conversations in this workspace.
+    #[arg(long)]
+    pub list_sessions: bool,
+
+    /// Maximum number of model turns per user message (default: 1000).
     #[arg(long, value_name = "N")]
     pub max_steps: Option<usize>,
 
