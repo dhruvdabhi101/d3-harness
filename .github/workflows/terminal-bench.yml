@@ -1,0 +1,92 @@
+name: Terminal-Bench
+
+on:
+  workflow_dispatch:
+    inputs:
+      dataset:
+        description: Terminal-Bench dataset reference
+        required: true
+        default: terminal-bench/terminal-bench@latest
+      model:
+        description: Model id passed to d3
+        required: true
+        default: deepseek-v4.1-flash
+      agent:
+        description: Harbor agent (oracle or the d3 adapter)
+        required: true
+        default: integrations.harbor.d3_agent:D3Agent
+      limit:
+        description: Number of tasks (use 1 for a smoke test)
+        required: true
+        default: "1"
+      suite:
+        description: Optional task name glob
+        required: false
+        default: ""
+
+jobs:
+  terminal-bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build d3
+        run: cargo build --release
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install Harbor
+        run: uv tool install harbor
+
+      - name: Check model credential
+        if: ${{ !contains(inputs.agent, 'oracle') }}
+        env:
+          OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
+        run: |
+          if [ -z "$OPENCODE_GO_API_KEY" ]; then
+            echo "Add OPENCODE_GO_API_KEY as a repository Actions secret first." >&2
+            exit 1
+          fi
+
+      - name: Run Terminal-Bench
+        env:
+          OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          AGENT="${{ inputs.agent }}"
+          ARGS=(
+            run
+            -d "${{ inputs.dataset }}"
+            --agent "$AGENT"
+            --env docker
+            --n-concurrent 1
+            --yes
+          )
+          if [[ "$AGENT" == *D3Agent* ]]; then
+            ARGS+=(
+              --ak "binary_path=$PWD/target/release/d3"
+              -m "${{ inputs.model }}"
+              --ae "OPENCODE_GO_API_KEY=$OPENCODE_GO_API_KEY"
+              --allow-agent-host opencode.ai
+            )
+          fi
+          if [ -n "${{ inputs.limit }}" ]; then
+            ARGS+=(-l "${{ inputs.limit }}")
+          fi
+          if [ -n "${{ inputs.suite }}" ]; then
+            ARGS+=(-i "${{ inputs.suite }}")
+          fi
+          PYTHONPATH=. harbor "${ARGS[@]}"
+
+      - name: Upload Harbor logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terminal-bench-jobs
+          path: jobs
+          if-no-files-found: ignore
