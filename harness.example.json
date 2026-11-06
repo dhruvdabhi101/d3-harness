@@ -19,6 +19,9 @@
   },
   "instructions": [],
   "providers": {
+    "opencode-go": {
+      "model": "deepseek-v4.1-flash"
+    },
     "text-only-example": {
       "type": "openai",
       "base_url": "http://localhost:8080/v1",

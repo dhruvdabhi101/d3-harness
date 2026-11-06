@@ -1,0 +1,17 @@
+{
+  "provider": "opencode",
+  "model": "deepseek-v4.1-flash",
+  "permissions": {
+    "shell": "allow",
+    "edit": "allow"
+  },
+  "providers": {
+    "opencode": {
+      "type": "openai",
+      "base_url": "https://opencode.ai/inference/go/openai/v1",
+      "models_url": "https://opencode.ai/inference/go/v1/models",
+      "api_key_env": "OPENCODE_GO_API_KEY",
+      "model": "deepseek-v4.1-flash"
+    }
+  }
+}

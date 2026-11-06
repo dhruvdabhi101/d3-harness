@@ -1,5 +1,5 @@
 mod fs_tools;
-mod shell;
+pub mod shell;
 
 use crate::config::{Permission, Permissions};
 use crate::conversation::ToolCall;
@@ -138,6 +138,19 @@ impl ToolRegistry {
 
     pub fn auto_approve(&self) -> bool {
         self.auto_approve
+    }
+
+    pub fn workspace(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn set_permission(&mut self, target: &str, value: Permission) -> Result<()> {
+        match target {
+            "shell" => self.permissions.shell = Some(value),
+            "edit" => self.permissions.edit = Some(value),
+            _ => bail!("unknown permission '{target}'; use shell or edit"),
+        }
+        Ok(())
     }
 
     pub fn print_startup(&self) {

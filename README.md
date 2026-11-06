@@ -5,8 +5,15 @@ A small, honest coding-agent harness for the terminal, written in Rust.
 It opens a full-screen TUI with a message box, a slash-command palette, model
 picking, approval dialogs, and live tool diffs. Behind it is a tool-calling
 agent loop that loads the context a real project needs: `AGENTS.md`, skills, and
-MCP servers. It talks to OpenCode, ChatGPT/Codex, OpenAI, Anthropic, and any
-OpenAI-compatible endpoint.
+MCP servers. It talks to OpenCode, OpenCode Go, ChatGPT/Codex, OpenAI, Anthropic,
+and any OpenAI-compatible endpoint.
+
+The harness also has a real management CLI: provider sign-in and logout,
+credential checks, model discovery, session listing, config inspection, MCP
+inspection, `AGENTS.md` scaffolding, updates, and a built-in benchmark that runs
+the actual agent loop and tools. In chat, `/compact` reclaims context, `/export`
+saves a transcript, `/diff` shows the working tree, `!command` runs a shell
+command, and `@path` attaches a file.
 
 The default system prompt is part of the product. It asks the agent to write
 code a careful human would review, to ask when ambiguity matters, to keep the
@@ -80,6 +87,49 @@ Then run `d3` from any project directory. Cargo installs the command in
 `~/.cargo/bin`; make sure that directory is on your `PATH`. Existing harness
 configuration and credentials remain in their current locations.
 
+## Sign in and manage credentials
+
+Credentials are managed by `d3 auth`, or by `/login` inside the TUI. The
+interactive flow never leaves the screen: choose a provider, paste an API key
+(masked and verified before it is saved), or approve a ChatGPT device code.
+`/logout` removes a stored key, and `/login` can rotate one.
+
+```bash
+d3 auth list                    # every provider, readiness, and key source
+d3 auth login opencode          # prompt, verify, and save a key
+d3 auth login                   # choose a provider from a list
+d3 auth login chatgpt           # device-code account sign-in
+d3 auth login opencode-go       # OpenCode Go subscription key
+d3 auth login opencode --api-key
+d3 auth logout opencode         # remove only the stored credential
+d3 auth logout --all            # remove every stored harness credential
+d3 auth check opencode          # local readiness, no network call
+d3 auth check opencode --verify # call the model catalog
+d3 auth check --json
+```
+
+Key handling rules:
+
+- An API key is verified against the provider's model catalog before it is
+  saved. A key the provider rejects is not kept.
+- A network or catalog failure still allows the key to be saved, with a warning,
+  so an outage does not block setup.
+- Keys are stored in `~/.config/harness/auth.json` with `0600` permissions.
+- Environment variables and `harness.json` values are never deleted by logout.
+- `d3 --login`, `--logout`, and `--check-auth` remain as aliases for the
+  selected provider.
+- OpenCode v2 keeps credentials in its own store. If a key is not found in
+  harness config, d3 asks `opencode auth export` for the OpenCode Console or
+  OpenCode Go credential. This means an existing OpenCode login can be reused
+  without copying a token into a file.
+
+ChatGPT sign-in drives the official `codex login --device-auth` flow. The TUI
+shows the verification URL and one-time code, opens the browser when possible
+(set `D3_NO_BROWSER=1` to disable), keeps the code on screen, and restores the
+previous Codex credentials if the login is cancelled. Models are read from
+Codex's catalog. ChatGPT credentials remain owned by Codex; `d3 auth logout
+chatgpt` explains that `codex logout` removes them.
+
 ## Quick start with OpenCode
 
 Run it:
@@ -101,6 +151,27 @@ d3 -m gpt-5.3-codex "fix the failing test"
 d3 -m claude-sonnet-4-5 "review this diff"
 d3 --list-models
 ```
+
+OpenCode Go uses its own endpoint and subscription:
+
+```bash
+d3 -p opencode-go -m deepseek-v4.1-flash "implement the endpoint"
+d3 models -p opencode-go --json
+```
+
+If OpenCode is already signed in, d3 reuses the stored OpenCode credential.
+The built-in `opencode-go` provider is the normal way to use a Go subscription.
+If a tool or script must run under the literal provider name `opencode` while
+the Console balance is empty, point the `opencode` preset at the Go endpoint:
+
+```bash
+export OPENCODE_GO_API_KEY="..."
+d3 -p opencode --config harness.opencode-go.json "implement the endpoint"
+d3 bench -p opencode --config harness.opencode-go.json --suite all
+```
+
+The repository includes [`harness.opencode-go.json`](harness.opencode-go.json)
+for that setup. It contains only an environment-variable reference, never a key.
 
 Run without a prompt for the full-screen interface:
 
@@ -147,8 +218,19 @@ Features:
   `[y] allow / [n] deny` in reach.
 - Slash-command palette that opens as soon as you type `/`.
 - Provider picker via `/provider`, with sign-in without leaving the TUI.
+- Credential management via `/login` (provider picker, masked key, live
+  verification) and `/logout`.
 - ChatGPT device-code sign-in via `/login`, including the URL and one-time code.
 - Live model picker via `/models`, fetched from the provider catalog.
+- `/compact` summarizes older history with the current model and replaces it
+  with a compact summary, so long sessions can keep going.
+- `/export` writes a Markdown transcript; `/copy` copies the last answer;
+  `/diff` shows Git status and the working diff; `/status` and `/cost` report
+  provider, branch, messages, and token usage.
+- `!command` runs a shell command and adds its output to the conversation;
+  `!!command` runs it without adding the output. `@path` attaches a file to the
+  next prompt, including images.
+- `/init` scaffolds `AGENTS.md`; `/permissions` changes shell/edit policy live.
 - Bottom approval bar for shell commands, with the exact command shown.
 - Question modal for `ask_user`, with options and free-form input.
 - Bottom status line with provider, model, Git branch, and approval mode.
@@ -290,6 +372,7 @@ Built-in presets:
 | Provider | API | Key | Default model |
 | --- | --- | --- | --- |
 | `opencode` | OpenAI Chat Completions | `OPENCODE_API_KEY` | `deepseek-v4.1-flash` |
+| `opencode-go` | OpenAI Chat Completions (Go) | `OPENCODE_GO_API_KEY` | `deepseek-v4.1-flash` |
 | `chatgpt` | ChatGPT/Codex backend | Codex CLI login | `gpt-5.6-sol` |
 | `openai` | OpenAI Responses | `OPENAI_API_KEY` | `gpt-5.3-codex` |
 | `codex` | OpenAI Responses | `OPENAI_API_KEY` | `gpt-5.3-codex` |
@@ -334,16 +417,27 @@ or `anthropic` (Messages). `base_url` should be the API root; the harness append
 
 A provider can also set `"api_key"` directly, or point at a non-standard model
 catalog with `"models_url"`. `HARNESS_API_KEY` overrides every provider key. For
-`opencode`, the harness falls back to OpenCode's `auth.json` if it can find it.
+`opencode` and `opencode-go`, the harness falls back to OpenCode's credential
+store: legacy `auth.json` files first, then `opencode auth export` for OpenCode
+v2. ChatGPT account credentials are read from Codex at runtime.
 
-OpenCode's model list lives at a different path from its Chat Completions
-endpoint, so the built-in `opencode` preset sets:
+OpenCode's Console model list lives at a different path from its Chat
+Completions endpoint, and OpenCode Go has its own base URL. The built-in presets
+set both:
 
 ```json
-"models_url": "https://opencode.ai/inference/v1/models"
+"opencode": {
+  "base_url": "https://opencode.ai/inference/openai/v1",
+  "models_url": "https://opencode.ai/inference/v1/models"
+},
+"opencode-go": {
+  "base_url": "https://opencode.ai/inference/go/openai/v1",
+  "models_url": "https://opencode.ai/inference/go/v1/models"
+}
 ```
 
-The default for other providers is `<base_url>/models`.
+OpenCode Go expects a stable `x-opencode-session` header. d3 sends one per
+provider session and identifies itself with `d3/<version>` as its user agent.
 
 If you already use Codex models through OpenCode, this works too because
 OpenCode's gateway translates text models across its APIs:
@@ -382,15 +476,17 @@ Paste the API key (hidden):
 
 The key is saved to `~/.config/harness/auth.json` (or
 `$XDG_CONFIG_HOME/harness/auth.json`) with `0600` permissions and reused on the
-next run. It is checked against the provider's model catalog before the session
-starts; a key the provider rejects is removed instead of being kept. Run
-`d3 --login -p opencode` to force the prompt again, for example to rotate a
-key or retry after an invalid one. When stdin is not a terminal, the harness
-never prompts; it fails with the environment variable and config options
-instead.
+next run. It is checked against the provider's model catalog before it is
+saved; a key the provider rejects is not kept. A catalog outage still saves the
+key with a warning. Run `d3 auth login opencode` to rotate a key, `d3 auth
+logout opencode` to remove it, or `d3 auth check opencode --verify` to test it.
+Inside the TUI, `/login` and `/logout` do the same without leaving the screen.
+When stdin is not a terminal, the harness never prompts; it fails with the
+environment variable and config options instead.
 
 Keys can also come from the provider's environment variable, an `api_key` in
-`harness.json`, a custom `api_key_env`, or `HARNESS_API_KEY`.
+`harness.json`, a custom `api_key_env`, or `HARNESS_API_KEY`. For `opencode` and
+`opencode-go`, d3 also reuses the credential stored by OpenCode itself.
 
 ### ChatGPT / OpenAI account authentication
 
@@ -539,6 +635,15 @@ A server that fails to start produces a warning and does not stop the session.
 
 ```text
 d3 [OPTIONS] [PROMPT]...
+d3 auth <login|logout|check|list> [OPTIONS]
+d3 models [SEARCH] [--json]
+d3 sessions [--json]
+d3 config [--json]
+d3 mcp [--json]
+d3 init [--force]
+d3 update
+d3 bench [--suite smoke|tools|all] [--json] [--filter TEXT] [--keep]
+d3 version
 
   -m, --model <MODEL>          model id
   -p, --provider <PROVIDER>    provider name
@@ -554,11 +659,20 @@ d3 [OPTIONS] [PROMPT]...
       --dump-context           print prompt, tools, skills, and MCP as JSON
       --list-providers         list providers and exit
       --list-models            fetch the provider's models and exit
-      --login                  ask for an API key, save it, verify it, and exit
+      --login                  sign in, verify, and exit (alias for auth login)
+      --logout                 remove the selected stored credential
+      --check-auth             check the selected credential locally
   -q, --quiet                  hide the startup banner
       --no-tui                 use the plain line-based REPL
       --no-color               disable color
 ```
+
+`d3 models` takes an optional case-insensitive search and can print JSON.
+`d3 sessions` lists this workspace's saved conversations. `d3 config` shows the
+resolved provider, model, permissions, and config/credential paths without
+printing secrets. `d3 mcp` connects and lists each server's tools. `d3 init`
+writes a starter `AGENTS.md` without overwriting an existing one unless
+`--force` is given. `d3 update` checks GitHub for a newer stable release.
 
 A custom system prompt replaces the core instructions, but the harness still
 appends the environment, `AGENTS.md`, skills catalog, and harness notes.
@@ -570,24 +684,103 @@ d3 "add a --json flag to the CLI"
 d3 -C ../other-project "why does this test fail?"
 echo "summarize the changes" | d3
 git diff | d3 "review this diff for bugs"
+d3 models -p opencode-go deepseek
 ```
 
 Interactive commands:
 
 ```text
-/help              show commands
-/new               clear the conversation
+/help              show commands and shortcuts
+/new               start a fresh conversation
+/resume [id]       choose a saved conversation
+/continue          resume the latest conversation
+/compact [focus]   summarize older history to free context
+/status            provider, model, branch, and context
+/context           message and token counts
+/cost              token usage for this session
+/diff              show Git status and the working diff
+/export [path]     save this conversation as Markdown
+/copy              copy the last answer to the clipboard
 /model [id]        show or change the model
 /models            fetch the provider's models and choose one
 /provider          choose and switch provider
-/login             sign in with ChatGPT or update a key
-/system            how to change the system prompt
-/tools             list available tools
-/skills            select an available skill (also type $ in a prompt)
-/mcp               list connected MCP servers
-/context           message and token counts
+/login [provider]  sign in or rotate credentials
+/logout [provider] remove a stored credential
 /approve [on|off]  toggle auto-approval
+/permissions       change shell/edit policy
+/tools             list available tools
+/skills            select a skill (also type $ in a prompt)
+/mcp               list connected MCP servers
+/init              create a starter AGENTS.md
+/ui                show customization settings
+/system            how to change the system prompt
+/version           show the harness version
+/paste-image       attach a clipboard image (Ctrl+V)
+/detach            remove pending images
 /exit              leave
+```
+
+Prompt shortcuts:
+
+```text
+!command           run a shell command and add its output to context
+!!command          run it without adding output to context
+@path              attach a text file or image to the next prompt
+```
+
+### Compaction
+
+`/compact` asks the current model to summarize the conversation, replaces the
+older messages with that summary, and keeps the session going. An optional
+argument focuses the summary: `/compact keep the failing test and the API
+contract`. Compaction is explicit; it never deletes a session file. The TUI
+reports how many messages were replaced and the token usage of the summary.
+
+### Export, diff, and clipboard
+
+`/export` writes Markdown to `d3-conversation-<timestamp>.md` in the workspace,
+or to the path you pass. `/diff` runs `git status`, `git diff --stat`, and the
+working diff. `/copy` uses `pbcopy` on macOS or `wl-copy`/`xclip`/`xsel` on
+Linux. `/context` and `/cost` report counts; the harness does not invent a price
+when the provider does not return one.
+
+## Benchmark
+
+`d3 bench` runs the real agent loop, real tool registry, and real provider
+connection against a temporary workspace. It is a harness check, not a
+model-only chat test. See [`docs/benchmarks.md`](docs/benchmarks.md) for a survey
+of external coding-agent benchmarks and how they compare with this one.
+
+```bash
+d3 bench -p opencode-go -m deepseek-v4.1-flash
+d3 bench --suite smoke
+d3 bench --suite tools --json
+d3 bench --filter write --keep
+```
+
+Tasks:
+
+- `reply`: the model must return an exact token.
+- `read`: the model must call `read` and report a secret from a file.
+- `write`: the model must call `write` and create the expected file.
+- `edit`: the model must call `edit` and change the expected line.
+
+The report includes pass/fail, latency, and input/output tokens per task. The
+command exits non-zero when any task fails. `--keep` leaves the temporary
+workspace in place for inspection.
+
+A live run under the literal `opencode` provider, pointed at the funded OpenCode
+Go endpoint with `harness.opencode-go.json`:
+
+```text
+harness benchmark · opencode/deepseek-v4.1-flash · suite all
+TASK       RESULT       TIME       TOKENS  DETAIL
+reply      PASS         719ms   8310/6      HARNESS_OK
+read       PASS        2268ms  16701/52     I'll read the file.benchmark-secret-42
+write      PASS        4471ms  16734/83     Created `answer.txt` with `benchmark-write-ok` and a trailing newline.
+edit       PASS        4977ms  33769/197    I'll read the file first, then make the edit.DONE `edit_me.txt` line 2…
+
+4/4 passed · 12.4s · 75514 input / 338 output tokens
 ```
 
 ## Verification
@@ -609,7 +802,14 @@ The test suite covers:
 - HTTP MCP initialization, session headers, SSE responses, and calls;
 - provider model-list fetching and sorted output;
 - API-key storage permissions and preservation of other provider keys;
+- auth check JSON, key-source reporting, logout isolation, and non-interactive
+  login failures;
+- context compaction through the provider and history replacement;
+- the benchmark harness against a mock provider, including tool read/write/edit
+  tasks;
 - TUI command-palette filtering, turn submission, streaming, and approval modals;
+- `/compact`, `/permissions`, `!` shell passthrough, `@file` mentions, and the
+  provider sign-in palette;
 - multi-line input editing and cursor movement at UTF-8 boundaries.
 
 To inspect exactly what the model will receive without spending tokens:
@@ -644,6 +844,5 @@ Default prompt principles:
 - verify with real commands and report failures honestly;
 - keep the user oriented so a mistake is visible while it is still cheap to fix.
 
-Not included yet: context compaction, image input, subagents, LSP integration,
-and sandboxing. Those are deliberate omissions for
-a first version, not hidden claims.
+Not included yet: subagents, LSP integration, plugin packages, session
+branching, and sandboxing. Those are deliberate omissions, not hidden claims.

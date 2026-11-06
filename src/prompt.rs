@@ -62,6 +62,24 @@ Write a comment only when it captures something the code cannot: a non-obvious r
 
 Write short, direct sentences in plain language. Open the final report with the user's outcome, then describe what changed and how it was verified. Label unverified claims and limitations. Avoid filler, decorative formatting, invented citations, and exaggerated confidence. The user wants working code and an honest account of it, not a performance."#;
 
+pub const AGENTS_TEMPLATE: &str = r#"# Project instructions
+
+## Commands
+
+- Build:
+- Test:
+- Format and lint:
+
+## Conventions
+
+- Describe the patterns code in this repository should follow.
+- Note generated files, directories to avoid, and release steps.
+
+## Verification
+
+- State how to prove a change works before calling it done.
+"#;
+
 pub struct PromptContext<'a> {
     pub core: &'a str,
     pub workspace: &'a Path,

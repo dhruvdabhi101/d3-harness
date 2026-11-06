@@ -79,3 +79,123 @@ impl Message {
             .join("\n")
     }
 }
+
+/// A plain-text view of the conversation for summarization requests.
+pub fn transcript(messages: &[Message], max_chars: usize) -> String {
+    let mut out = String::new();
+    for message in messages {
+        let role = match message.role {
+            Role::User => "User",
+            Role::Assistant => "Assistant",
+            Role::Tool => "Tool",
+        };
+        for block in &message.blocks {
+            match block {
+                Block::Text(text) if !text.trim().is_empty() => {
+                    out.push_str(&format!("{role}: {}\n\n", text.trim()));
+                }
+                Block::Image(image) => {
+                    out.push_str(&format!(
+                        "{role}: [image attachment: {} ({})]\n\n",
+                        image.name, image.media_type
+                    ));
+                }
+                Block::ToolCall(call) => {
+                    out.push_str(&format!(
+                        "{role}: [called tool `{}` with {}]\n\n",
+                        call.name, call.arguments
+                    ));
+                }
+                Block::ToolResult {
+                    tool_call_id,
+                    content,
+                    is_error,
+                } => {
+                    let label = if *is_error {
+                        "tool error"
+                    } else {
+                        "tool result"
+                    };
+                    out.push_str(&format!(
+                        "{label} ({tool_call_id}): {}\n\n",
+                        truncate_chars(content, 4_000)
+                    ));
+                }
+                Block::ProviderItems(_) => {}
+                Block::Text(_) => {}
+            }
+        }
+    }
+    if out.chars().count() <= max_chars {
+        return out;
+    }
+    let kept = out
+        .chars()
+        .rev()
+        .take(max_chars)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("[earlier conversation omitted to fit the model context]\n\n{kept}")
+}
+
+pub fn to_markdown(messages: &[Message]) -> String {
+    let mut out = String::from("# d3 conversation\n\n");
+    for message in messages {
+        let heading = match message.role {
+            Role::User => "User",
+            Role::Assistant => "Assistant",
+            Role::Tool => "Tool",
+        };
+        for block in &message.blocks {
+            match block {
+                Block::Text(text) if !text.trim().is_empty() => {
+                    out.push_str(&format!("## {heading}\n\n{}\n\n", text.trim()));
+                }
+                Block::Image(image) => {
+                    out.push_str(&format!(
+                        "## {heading}\n\n_Image attachment: {} ({})_\n\n",
+                        image.name, image.media_type
+                    ));
+                }
+                Block::ToolCall(call) => {
+                    out.push_str(&format!(
+                        "### Tool call: `{}`\n\n{}\n\n",
+                        call.name,
+                        fenced(&call.arguments, "json")
+                    ));
+                }
+                Block::ToolResult {
+                    content, is_error, ..
+                } => {
+                    let label = if *is_error {
+                        "Tool error"
+                    } else {
+                        "Tool result"
+                    };
+                    out.push_str(&format!("### {label}\n\n{}\n\n", fenced(content, "")));
+                }
+                Block::ProviderItems(_) => {}
+                Block::Text(_) => {}
+            }
+        }
+    }
+    out
+}
+
+fn fenced(text: &str, language: &str) -> String {
+    let fence = if text.contains("```") { "````" } else { "```" };
+    format!("{fence}{language}\n{}\n{fence}", text.trim_end())
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_string()
+    } else {
+        format!(
+            "{}… [truncated]",
+            text.chars().take(max).collect::<String>()
+        )
+    }
+}

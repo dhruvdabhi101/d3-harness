@@ -354,7 +354,7 @@ impl Config {
     }
 }
 
-fn selection_path() -> Option<PathBuf> {
+pub fn selection_path() -> Option<PathBuf> {
     dirs::config_dir().map(|dir| dir.join("harness").join("selection.json"))
 }
 
@@ -371,11 +371,11 @@ fn write_selection(path: &Path, provider: &str, model: &str) -> Result<()> {
     .with_context(|| format!("saving selection to {}", path.display()))
 }
 
-fn global_config_path() -> Option<PathBuf> {
+pub fn global_config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|dir| dir.join("harness").join("config.json"))
 }
 
-fn find_project_config(workspace: &Path) -> Option<PathBuf> {
+pub fn find_project_config(workspace: &Path) -> Option<PathBuf> {
     for dir in workspace.ancestors() {
         let direct = dir.join("harness.json");
         if direct.is_file() {
@@ -419,45 +419,104 @@ pub fn resolve_api_key(name: &str, cfg: &ProviderConfig, interactive: bool) -> R
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeySource {
+    HarnessEnv,
+    ProviderConfig,
+    ProviderEnv,
+    Stored,
+    OpencodeAuth,
+    Codex,
+    Local,
+}
+
+impl KeySource {
+    pub fn label(self) -> &'static str {
+        match self {
+            KeySource::HarnessEnv => "HARNESS_API_KEY",
+            KeySource::ProviderConfig => "harness.json api_key",
+            KeySource::ProviderEnv => "provider environment variable",
+            KeySource::Stored => "harness auth.json",
+            KeySource::OpencodeAuth => "OpenCode credential store",
+            KeySource::Codex => "Codex CLI login",
+            KeySource::Local => "local endpoint (no key)",
+        }
+    }
+}
+
 pub fn find_api_key(name: &str, cfg: &ProviderConfig) -> Option<String> {
+    api_key_with_source(name, cfg).map(|(key, _)| key)
+}
+
+pub fn api_key_with_source(name: &str, cfg: &ProviderConfig) -> Option<(String, KeySource)> {
     if let Ok(key) = std::env::var("HARNESS_API_KEY")
         && !key.is_empty()
     {
-        return Some(key);
+        return Some((key, KeySource::HarnessEnv));
     }
     if let Some(key) = &cfg.api_key
         && !key.is_empty()
     {
-        return Some(key.clone());
+        return Some((key.clone(), KeySource::ProviderConfig));
     }
     if let Some(var) = &cfg.api_key_env
         && let Ok(key) = std::env::var(var)
         && !key.is_empty()
     {
-        return Some(key);
+        return Some((key, KeySource::ProviderEnv));
     }
     if let Some(key) = stored_api_key(name) {
-        return Some(key);
+        return Some((key, KeySource::Stored));
     }
-    if matches!(name, "opencode" | "zen" | "opencode-zen")
+    if matches!(name, "opencode" | "zen" | "opencode-zen" | "opencode-go")
         && let Some(key) = key_from_opencode_auth(name)
     {
-        return Some(key);
+        return Some((key, KeySource::OpencodeAuth));
+    }
+    if cfg.api_key.is_none()
+        && cfg.api_key_env.is_none()
+        && cfg
+            .base_url
+            .as_deref()
+            .is_some_and(|base| base.contains("localhost") || base.contains("127.0.0.1"))
+    {
+        return Some(("local".to_string(), KeySource::Local));
     }
     None
+}
+
+pub fn login_hint(name: &str) -> &'static str {
+    match name {
+        "opencode" | "zen" | "opencode-zen" => "Get a key at https://opencode.ai/auth.",
+        "opencode-go" => "Get a Go key at https://opencode.ai/console (Go subscription).",
+        "openai" | "codex" => "Get a key at https://platform.openai.com/api-keys.",
+        "anthropic" => "Get a key at https://console.anthropic.com/settings/keys.",
+        "openrouter" => "Get a key at https://openrouter.ai/keys.",
+        "deepseek" => "Get a key at https://platform.deepseek.com/api_keys.",
+        "groq" => "Get a key at https://console.groq.com/keys.",
+        "mistral" => "Get a key at https://console.mistral.ai/api-keys.",
+        "xai" => "Get a key at https://console.x.ai.",
+        "chatgpt" => "Sign in with your ChatGPT account using the device-code flow.",
+        "ollama" | "lmstudio" => "Run the local server; no API key is required.",
+        _ => "Check your provider's dashboard for an API key.",
+    }
 }
 
 pub fn prompt_and_store_key(name: &str, interactive: bool) -> Result<String> {
     if !interactive {
         bail!("no terminal available to ask for an API key");
     }
-    let hint = match name {
-        "opencode" => "Get a key at https://opencode.ai/auth.",
-        "openai" | "codex" => "Get a key at https://platform.openai.com/api-keys.",
-        "anthropic" => "Get a key at https://console.anthropic.com/settings/keys.",
-        "openrouter" => "Get a key at https://openrouter.ai/keys.",
-        _ => "Check your provider's dashboard for an API key.",
-    };
+    let key = prompt_key(name)?;
+    match store_api_key(name, &key) {
+        Ok(path) => crate::ui::info(&format!("saved key to {}", path.display())),
+        Err(error) => crate::ui::warn(&format!("could not save the key: {error:#}")),
+    }
+    Ok(key)
+}
+
+/// Prompt for a key without saving it, so callers can verify it first.
+pub fn prompt_key(name: &str) -> Result<String> {
+    let hint = login_hint(name);
     eprintln!();
     eprintln!(
         "{} {}",
@@ -469,10 +528,6 @@ pub fn prompt_and_store_key(name: &str, interactive: bool) -> Result<String> {
     let key = key.trim().to_string();
     if key.is_empty() {
         bail!("no API key entered");
-    }
-    match store_api_key(name, &key) {
-        Ok(path) => crate::ui::info(&format!("saved key to {}", path.display())),
-        Err(error) => crate::ui::warn(&format!("could not save the key: {error:#}")),
     }
     Ok(key)
 }
@@ -512,6 +567,79 @@ pub fn remove_api_key(provider: &str) -> Result<()> {
         map.remove(provider);
     }
     write_private_json(&path, &value)
+}
+
+/// Remove the credential that `--login` or `/login` stored for a provider.
+/// Environment variables and `harness.json` values are left untouched.
+pub fn logout(provider: &str) -> Result<bool> {
+    let Some(path) = auth_path() else {
+        return Ok(false);
+    };
+    logout_at(&path, provider)
+}
+
+fn logout_at(path: &Path, provider: &str) -> Result<bool> {
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let mut value = read_auth_value(path);
+    let removed = value
+        .as_object_mut()
+        .and_then(|map| map.remove(provider))
+        .is_some();
+    if removed {
+        write_private_json(path, &value)?;
+    }
+    Ok(removed)
+}
+
+pub fn stored_providers() -> Vec<String> {
+    auth_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|value| value.as_object().map(|map| map.keys().cloned().collect()))
+        .unwrap_or_default()
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthStatus {
+    pub provider: String,
+    pub kind: ProviderKind,
+    pub ready: bool,
+    pub source: Option<KeySource>,
+    pub stored: bool,
+}
+
+pub fn auth_status(name: &str, cfg: &ProviderConfig) -> AuthStatus {
+    let kind = cfg.kind.unwrap_or_default();
+    let stored = stored_api_key(name).is_some();
+    if kind == ProviderKind::ChatGpt {
+        if let (Some(_), Some(_)) = (&cfg.api_key, &cfg.account_id) {
+            return AuthStatus {
+                provider: name.to_string(),
+                kind,
+                ready: true,
+                source: Some(KeySource::ProviderConfig),
+                stored,
+            };
+        }
+        let codex = codex_auth();
+        return AuthStatus {
+            provider: name.to_string(),
+            kind,
+            ready: codex.is_ok(),
+            source: codex.ok().map(|_| KeySource::Codex),
+            stored,
+        };
+    }
+    let source = api_key_with_source(name, cfg).map(|(_, source)| source);
+    AuthStatus {
+        provider: name.to_string(),
+        kind,
+        ready: source.is_some(),
+        source,
+        stored,
+    }
 }
 
 fn read_auth_value(path: &Path) -> serde_json::Value {
@@ -609,7 +737,11 @@ fn key_from_opencode_auth(provider: &str) -> Option<String> {
     if let Some(home) = dirs::home_dir() {
         candidates.push(home.join(".opencode").join("auth.json"));
     }
-    let names = [provider, "opencode", "zen", "opencode-zen"];
+    let names: &[&str] = if provider == "opencode-go" {
+        &["opencode-go"]
+    } else {
+        &[provider, "opencode", "zen", "opencode-zen"]
+    };
     for path in candidates {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
@@ -623,6 +755,43 @@ fn key_from_opencode_auth(provider: &str) -> Option<String> {
             {
                 return Some(key);
             }
+        }
+    }
+    key_from_opencode_cli(provider)
+}
+
+/// OpenCode v2 stores credentials in its own database. `opencode auth export`
+/// is the supported read path; it writes JSON only to stdout.
+fn key_from_opencode_cli(provider: &str) -> Option<String> {
+    let integration = if provider == "opencode-go" {
+        "opencode-go"
+    } else {
+        "opencode"
+    };
+    let output = std::process::Command::new("opencode")
+        .args(["auth", "export"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let entries = value.as_array()?;
+    for entry in entries {
+        let id = entry
+            .get("integrationID")
+            .and_then(serde_json::Value::as_str);
+        let active = entry
+            .get("active")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        if id == Some(integration)
+            && active
+            && let Some(key) = entry.get("value").and_then(find_key)
+        {
+            return Some(key);
         }
     }
     None
@@ -657,6 +826,17 @@ pub fn provider_presets() -> Vec<ProviderConfig> {
             );
             opencode.models_url = Some("https://opencode.ai/inference/v1/models".to_string());
             opencode
+        },
+        {
+            let mut go = preset(
+                "opencode-go",
+                ProviderKind::OpenAi,
+                "https://opencode.ai/inference/go/openai/v1",
+                "OPENCODE_GO_API_KEY",
+                "deepseek-v4.1-flash",
+            );
+            go.models_url = Some("https://opencode.ai/inference/go/v1/models".to_string());
+            go
         },
         preset(
             "chatgpt",
@@ -844,6 +1024,57 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn logout_removes_only_the_stored_provider_credential() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("harness/auth.json");
+        write_auth_key(&path, "opencode", "one").unwrap();
+        write_auth_key(&path, "openai", "two").unwrap();
+        assert!(logout_at(&path, "opencode").unwrap());
+        assert!(!logout_at(&path, "missing").unwrap());
+        let value = read_auth_value(&path);
+        assert!(value.get("opencode").is_none());
+        assert_eq!(value["openai"]["key"], "two");
+    }
+
+    #[test]
+    fn key_source_reports_config_before_environment_fallback() {
+        let cfg = ProviderConfig {
+            api_key: Some("config-key".into()),
+            api_key_env: Some("HARNESS_TEST_KEY_THAT_IS_NOT_SET".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            api_key_with_source("test-provider", &cfg).map(|(_, source)| source),
+            Some(KeySource::ProviderConfig)
+        );
+        let local = ProviderConfig {
+            base_url: Some("http://localhost:1234/v1".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            api_key_with_source("local-provider", &local).map(|(_, source)| source),
+            Some(KeySource::Local)
+        );
+    }
+
+    #[test]
+    fn opencode_go_preset_uses_its_own_endpoint_and_catalog() {
+        let presets = provider_presets();
+        let go = presets
+            .iter()
+            .find(|preset| preset.name == "opencode-go")
+            .unwrap();
+        assert_eq!(
+            go.base_url.as_deref(),
+            Some("https://opencode.ai/inference/go/openai/v1")
+        );
+        assert_eq!(
+            go.models_url.as_deref(),
+            Some("https://opencode.ai/inference/go/v1/models")
+        );
     }
 
     #[test]

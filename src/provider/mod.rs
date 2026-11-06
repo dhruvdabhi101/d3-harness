@@ -52,6 +52,7 @@ pub struct Provider {
     api_key: String,
     account_id: Option<String>,
     client: reqwest::Client,
+    session_id: String,
     image_capabilities: std::sync::Mutex<std::collections::BTreeMap<String, bool>>,
 }
 
@@ -67,8 +68,17 @@ impl Provider {
         }
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(20))
+            .user_agent(concat!("d3/", env!("CARGO_PKG_VERSION")))
             .build()
             .context("building HTTP client")?;
+        let session_id = format!(
+            "d3-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
         Ok(Self {
             name,
             config,
@@ -76,6 +86,7 @@ impl Provider {
             api_key: auth.key,
             account_id: auth.account_id,
             client,
+            session_id,
             image_capabilities: std::sync::Mutex::default(),
         })
     }
@@ -107,6 +118,7 @@ impl Provider {
                 .header("anthropic-version", "2023-06-01"),
             _ => request.bearer_auth(&self.api_key),
         };
+        request = self.apply_session_header(request);
         let response = request.send().await?;
         if !response.status().is_success() {
             let status = response.status();
@@ -199,9 +211,25 @@ impl Provider {
         req
     }
 
+    /// OpenCode Go asks clients to send a stable session id so requests can be
+    /// routed and cached efficiently.
+    fn apply_session_header(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let is_go = self.name == "opencode-go"
+            || self
+                .config
+                .base_url
+                .as_deref()
+                .is_some_and(|base| base.contains("/inference/go/"));
+        if is_go {
+            req.header("x-opencode-session", &self.session_id)
+        } else {
+            req
+        }
+    }
+
     pub(super) fn json_request(&self, url: &str, body: &Value) -> reqwest::RequestBuilder {
         let req = self.client.post(url).json(body);
-        self.apply_headers(req)
+        self.apply_session_header(self.apply_headers(req))
     }
 
     pub(super) fn bearer_request(&self, url: &str, body: &Value) -> reqwest::RequestBuilder {
@@ -213,7 +241,7 @@ impl Provider {
                 .header("chatgpt-account-id", account_id)
                 .header("originator", "codex_cli_rs");
         }
-        self.apply_headers(req)
+        self.apply_session_header(self.apply_headers(req))
     }
 
     pub(super) fn max_tokens(&self) -> Option<u32> {
@@ -401,6 +429,55 @@ mod tests {
                 .to_string()
                 .contains("does not accept image input")
         );
+    }
+
+    #[tokio::test]
+    async fn opencode_go_requests_include_a_stable_session_header() {
+        use axum::http::HeaderMap;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let seen = std::sync::Arc::new(AtomicBool::new(false));
+        let state = seen.clone();
+        let router = axum::Router::new().route(
+            "/models",
+            axum::routing::get(move |headers: HeaderMap| {
+                let seen = state.clone();
+                async move {
+                    let session = headers
+                        .get("x-opencode-session")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("");
+                    let user_agent = headers
+                        .get("user-agent")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("");
+                    seen.store(
+                        session.starts_with("d3-") && user_agent.starts_with("d3/"),
+                        Ordering::SeqCst,
+                    );
+                    axum::Json(serde_json::json!({"data": [{"id": "model"}]}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let provider = Provider::new(
+            "opencode-go".into(),
+            ProviderConfig {
+                base_url: Some(format!("http://{address}")),
+                ..Default::default()
+            },
+            "model".into(),
+            ProviderAuth {
+                key: "test".into(),
+                account_id: None,
+            },
+        )
+        .unwrap();
+        provider.list_models().await.unwrap();
+        assert!(seen.load(Ordering::SeqCst));
     }
 
     #[test]

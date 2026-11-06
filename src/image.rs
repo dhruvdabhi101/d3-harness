@@ -155,10 +155,50 @@ async fn clipboard_image() -> Result<ImageAttachment> {
     bail!("clipboard has no readable PNG image; paste an image file path into the chatbox instead")
 }
 
+/// Copy plain text to the system clipboard. Returns an error when no supported
+/// clipboard writer is installed.
+pub fn copy_text(text: &str) -> Result<()> {
+    use std::io::Write;
+    use std::process::{Command as StdCommand, Stdio};
+
+    #[cfg(target_os = "macos")]
+    let candidates: &[(&str, &[&str])] = &[("pbcopy", &[])];
+    #[cfg(not(target_os = "macos"))]
+    let candidates: &[(&str, &[&str])] = &[
+        ("wl-copy", &[]),
+        ("xclip", &["-selection", "clipboard"]),
+        ("xsel", &["--clipboard", "--input"]),
+    ];
+    let mut found = false;
+    for (program, args) in candidates {
+        let mut child = match StdCommand::new(program)
+            .args(*args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).context("starting clipboard writer"),
+        };
+        found = true;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(text.as_bytes())?;
+        }
+        if child.wait()?.success() {
+            return Ok(());
+        }
+    }
+    if found {
+        bail!("the clipboard writer exited with an error");
+    }
+    bail!("no clipboard writer found; install wl-clipboard, xclip, or xsel")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn formats_are_detected_from_bytes_and_oversized_inputs_are_rejected() {
         for (bytes, media) in [

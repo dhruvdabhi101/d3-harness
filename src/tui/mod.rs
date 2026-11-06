@@ -80,14 +80,37 @@ pub enum WorkerCommand {
     SetProvider(Box<Provider>, String),
     SetModel(String),
     SetAutoApprove(bool),
+    SetPermission {
+        target: String,
+        value: crate::config::Permission,
+    },
     ListModels,
+    Compact(Option<String>),
+    Shell {
+        command: String,
+        include: bool,
+    },
+    Export(Option<String>),
+    Diff,
     Quit,
 }
 
 pub enum LoginEvent {
-    Code { url: String, code: String },
+    Code {
+        url: String,
+        code: String,
+    },
     Success,
     Failed(String),
+    KeyVerified {
+        provider: String,
+        key: String,
+        models: usize,
+    },
+    KeyRejected {
+        provider: String,
+        error: String,
+    },
 }
 
 pub enum WorkerEvent {
@@ -97,6 +120,19 @@ pub enum WorkerEvent {
     ClipboardImage(Result<crate::image::ClipboardContent, String>),
     Sessions(Result<Vec<crate::session::SessionSummary>, String>),
     Resumed(Result<Vec<crate::conversation::Message>, String>),
+    Compacted(Result<crate::agent::CompactInfo, String>),
+    ShellOutput {
+        command: String,
+        output: String,
+        included: bool,
+    },
+    PermissionChanged {
+        target: String,
+        value: crate::config::Permission,
+        result: Result<(), String>,
+    },
+    Exported(Result<std::path::PathBuf, String>),
+    Diff(Result<String, String>),
 }
 
 pub struct TuiSetup {
@@ -526,6 +562,16 @@ async fn worker(
             WorkerCommand::SetProvider(provider, model) => agent.set_provider(*provider, model),
             WorkerCommand::SetModel(model) => agent.set_model(model),
             WorkerCommand::SetAutoApprove(value) => agent.set_auto_approve(value),
+            WorkerCommand::SetPermission { target, value } => {
+                let result = agent
+                    .set_permission(&target, value)
+                    .map_err(|error| format!("{error:#}"));
+                let _ = events.send(WorkerEvent::PermissionChanged {
+                    target,
+                    value,
+                    result,
+                });
+            }
             WorkerCommand::ListModels => {
                 let result = agent
                     .list_models()
@@ -533,9 +579,74 @@ async fn worker(
                     .map_err(|error| format!("{error:#}"));
                 let _ = events.send(WorkerEvent::Models(result));
             }
+            WorkerCommand::Compact(focus) => {
+                let result = agent
+                    .compact(focus.as_deref())
+                    .await
+                    .map_err(|error| format!("{error:#}"));
+                let _ = events.send(WorkerEvent::Compacted(result));
+            }
+            WorkerCommand::Shell { command, include } => {
+                let output = crate::tools::shell::run(&command, agent.workspace(), 300)
+                    .await
+                    .map(|output| output.content)
+                    .unwrap_or_else(|error| format!("{error:#}"));
+                if include {
+                    let _ = agent.append_context(format!(
+                        "Output of `!{command}` (run by the user, not by you):\n\n{output}"
+                    ));
+                }
+                let _ = events.send(WorkerEvent::ShellOutput {
+                    command,
+                    output,
+                    included: include,
+                });
+            }
+            WorkerCommand::Export(requested) => {
+                let result = export_markdown(&agent, requested.as_deref());
+                let _ = events.send(WorkerEvent::Exported(result));
+            }
+            WorkerCommand::Diff => {
+                let output = crate::tools::shell::run(
+                    "git status --short; git diff --stat; git diff -- . ':!Cargo.lock'",
+                    agent.workspace(),
+                    60,
+                )
+                .await
+                .map(|output| output.content)
+                .map_err(|error| format!("{error:#}"));
+                let _ = events.send(WorkerEvent::Diff(output));
+            }
             WorkerCommand::Quit => break,
         }
     }
+}
+
+fn export_markdown(agent: &Agent, requested: Option<&str>) -> Result<std::path::PathBuf, String> {
+    let workspace = agent.workspace();
+    let path = match requested {
+        Some(raw) if !raw.trim().is_empty() => {
+            let raw = raw.trim();
+            let path = std::path::PathBuf::from(raw);
+            if path.is_absolute() {
+                path
+            } else {
+                workspace.join(path)
+            }
+        }
+        _ => {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            workspace.join(format!("d3-conversation-{stamp}.md"))
+        }
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| format!("{error:#}"))?;
+    }
+    std::fs::write(&path, agent.export_markdown()).map_err(|error| format!("{error:#}"))?;
+    Ok(path)
 }
 
 struct TuiTerminal {

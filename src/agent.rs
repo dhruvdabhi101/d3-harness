@@ -17,6 +17,14 @@ pub struct Agent {
     session: Option<crate::session::Session>,
 }
 
+pub struct CompactInfo {
+    pub before_messages: usize,
+    pub after_messages: usize,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub summary: String,
+}
+
 impl Agent {
     pub fn new(
         provider: Provider,
@@ -132,6 +140,73 @@ impl Agent {
 
     pub fn usage(&self) -> Usage {
         self.usage
+    }
+
+    pub fn workspace(&self) -> &std::path::Path {
+        self.tools.workspace()
+    }
+
+    pub fn set_permission(&mut self, target: &str, value: crate::config::Permission) -> Result<()> {
+        self.tools.set_permission(target, value)
+    }
+
+    /// Record context without calling the model. Used by the `!` shell command.
+    pub fn append_context(&mut self, text: String) -> Result<()> {
+        if text.trim().is_empty() {
+            return Ok(());
+        }
+        self.messages.push(Message::user(text));
+        self.save()
+    }
+
+    pub fn export_markdown(&self) -> String {
+        crate::conversation::to_markdown(&self.messages)
+    }
+
+    pub async fn compact(&mut self, instructions: Option<&str>) -> Result<CompactInfo> {
+        if self.messages.is_empty() {
+            bail!("there is no conversation to compact");
+        }
+        let before_messages = self.messages.len();
+        let transcript = crate::conversation::transcript(&self.messages, 120_000);
+        let focus = instructions
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(|text| format!("\n\nThe user wants the summary to focus on: {text}"))
+            .unwrap_or_default();
+        let system = format!(
+            "You compact coding-agent conversations. Write a dense, factual summary that preserves the user's goal, decisions, constraints, files and paths touched, commands run, test results, open problems, and the next concrete step. Omit pleasantries and repetition. Do not invent details. Use short headings and bullets. The summary will replace the older conversation, so it must be self-contained.{focus}"
+        );
+        let request = vec![Message::user(format!(
+            "Summarize this conversation:\n\n{transcript}"
+        ))];
+        let completion = self
+            .provider
+            .complete(&system, &request, &[], &mut |_| {})
+            .await?;
+        let summary = completion.text.trim().to_string();
+        if summary.is_empty() {
+            bail!("the model returned an empty summary; the conversation was not compacted");
+        }
+        self.messages = vec![
+            Message::user(format!(
+                "[Compacted conversation summary. Older messages were replaced to save context.]\n\n{summary}"
+            )),
+            Message::assistant(
+                "I have the compacted context. Continue from the summary above.".to_string(),
+                Vec::new(),
+            ),
+        ];
+        self.usage.input_tokens += completion.usage.input_tokens;
+        self.usage.output_tokens += completion.usage.output_tokens;
+        self.save()?;
+        Ok(CompactInfo {
+            before_messages,
+            after_messages: self.messages.len(),
+            input_tokens: completion.usage.input_tokens,
+            output_tokens: completion.usage.output_tokens,
+            summary,
+        })
     }
 
     pub fn toggle_auto_approve(&mut self) -> bool {

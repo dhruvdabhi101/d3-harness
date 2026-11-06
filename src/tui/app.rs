@@ -45,10 +45,14 @@ pub struct TuiInfo {
     pub workspace: PathBuf,
     pub branch: Option<String>,
     pub skills: Vec<String>,
+    pub tool_names: Vec<String>,
     pub mcp: usize,
+    pub mcp_servers: Vec<String>,
     pub tools: usize,
     pub auto_approve: bool,
     pub connected: bool,
+    pub shell_permission: config::Permission,
+    pub edit_permission: config::Permission,
     pub providers: Vec<ProviderChoice>,
     pub ui: config::UiConfig,
 }
@@ -125,12 +129,13 @@ struct Palette {
     selected: usize,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum PaletteKind {
     Commands,
     Skills,
     Models,
     Providers,
+    LoginProviders,
     Sessions,
 }
 
@@ -152,6 +157,8 @@ enum Modal {
     ApiKey {
         provider: ProviderChoice,
         input: InputBuffer,
+        status: String,
+        checking: bool,
     },
     Login {
         provider: ProviderChoice,
@@ -159,6 +166,7 @@ enum Modal {
         code: Option<String>,
         status: String,
         failed: bool,
+        browser_opened: bool,
     },
 }
 
@@ -175,12 +183,12 @@ struct CommandSpec {
 
 const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
-        name: "/paste-image",
-        description: "paste clipboard image or text",
+        name: "/help",
+        description: "show commands and shortcuts",
     },
     CommandSpec {
-        name: "/detach",
-        description: "remove pending image attachments",
+        name: "/new",
+        description: "start a fresh conversation",
     },
     CommandSpec {
         name: "/resume",
@@ -191,16 +199,32 @@ const COMMANDS: &[CommandSpec] = &[
         description: "continue the latest conversation in this project",
     },
     CommandSpec {
-        name: "/ui",
-        description: "show UI customization settings",
+        name: "/compact",
+        description: "summarize history to free context",
     },
     CommandSpec {
-        name: "/help",
-        description: "show commands and shortcuts",
+        name: "/status",
+        description: "show provider, model, branch, and context",
     },
     CommandSpec {
-        name: "/new",
-        description: "start a fresh conversation",
+        name: "/context",
+        description: "show messages and token usage",
+    },
+    CommandSpec {
+        name: "/cost",
+        description: "show token usage for this session",
+    },
+    CommandSpec {
+        name: "/diff",
+        description: "show Git status and the working diff",
+    },
+    CommandSpec {
+        name: "/export",
+        description: "save this conversation as Markdown",
+    },
+    CommandSpec {
+        name: "/copy",
+        description: "copy the last answer to the clipboard",
     },
     CommandSpec {
         name: "/model",
@@ -215,6 +239,22 @@ const COMMANDS: &[CommandSpec] = &[
         description: "choose and switch provider",
     },
     CommandSpec {
+        name: "/login",
+        description: "sign in or rotate provider credentials",
+    },
+    CommandSpec {
+        name: "/logout",
+        description: "remove stored credentials for a provider",
+    },
+    CommandSpec {
+        name: "/approve",
+        description: "toggle auto-approval",
+    },
+    CommandSpec {
+        name: "/permissions",
+        description: "view or change shell and edit permissions",
+    },
+    CommandSpec {
         name: "/tools",
         description: "list available tools",
     },
@@ -227,20 +267,28 @@ const COMMANDS: &[CommandSpec] = &[
         description: "list connected MCP servers",
     },
     CommandSpec {
-        name: "/context",
-        description: "show messages and token usage",
+        name: "/init",
+        description: "create a starter AGENTS.md",
     },
     CommandSpec {
-        name: "/approve",
-        description: "toggle auto-approval",
+        name: "/ui",
+        description: "show UI customization settings",
     },
     CommandSpec {
         name: "/system",
         description: "how to change the system prompt",
     },
     CommandSpec {
-        name: "/login",
-        description: "sign in with ChatGPT or update a key",
+        name: "/version",
+        description: "show the harness version",
+    },
+    CommandSpec {
+        name: "/paste-image",
+        description: "paste clipboard image or text",
+    },
+    CommandSpec {
+        name: "/detach",
+        description: "remove pending image attachments",
     },
     CommandSpec {
         name: "/exit",
@@ -643,6 +691,7 @@ impl App {
             PaletteKind::Skills => " skills ",
             PaletteKind::Models => " models ",
             PaletteKind::Providers => " providers ",
+            PaletteKind::LoginProviders => " sign in to ",
             PaletteKind::Sessions => " project conversations ",
         };
         let block = Block::bordered()
@@ -755,14 +804,23 @@ impl App {
                     Style::default().fg(FAINT),
                 )));
             }
-            Modal::ApiKey { provider, input } => {
+            Modal::ApiKey {
+                provider,
+                input,
+                status,
+                checking,
+            } => {
                 lines.push(Line::from(Span::styled(
                     format!("Sign in to {}", provider.name),
                     Style::default().fg(Color::Rgb(225, 225, 230)),
                 )));
                 lines.push(Line::default());
                 lines.push(Line::from(Span::styled(
-                    "Paste the provider's key. Input is hidden.",
+                    config::login_hint(&provider.name),
+                    Style::default().fg(DIM),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "Paste the provider's key. Input is hidden and verified before it is saved.",
                     Style::default().fg(DIM),
                 )));
                 lines.push(Line::default());
@@ -772,9 +830,20 @@ impl App {
                     Span::styled(masked, Style::default().fg(GREEN)),
                     Span::styled("▌", Style::default().fg(ACCENT)),
                 ]));
+                if !status.is_empty() {
+                    lines.push(Line::default());
+                    lines.push(Line::from(Span::styled(
+                        status.clone(),
+                        Style::default().fg(if *checking { YELLOW } else { RED }),
+                    )));
+                }
                 lines.push(Line::default());
                 lines.push(Line::from(Span::styled(
-                    "Enter sign in · Esc cancel",
+                    if *checking {
+                        "checking the key with the provider…"
+                    } else {
+                        "Enter sign in · Esc cancel"
+                    },
                     Style::default().fg(FAINT),
                 )));
             }
@@ -784,6 +853,7 @@ impl App {
                 code,
                 status,
                 failed,
+                ..
             } => {
                 lines.push(Line::from(Span::styled(
                     format!("Sign in to {} with your ChatGPT account.", provider.name),
@@ -1173,6 +1243,10 @@ impl App {
                             self.input.clear();
                             self.switch_provider(&item.value);
                         }
+                        PaletteKind::LoginProviders => {
+                            self.input.clear();
+                            self.begin_login(&item.value);
+                        }
                     }
                 }
             }
@@ -1285,36 +1359,83 @@ impl App {
                     _ => self.modal = Some(modal),
                 }
             }
-            Modal::ApiKey { provider, input } => match key.code {
-                KeyCode::Esc => {}
-                KeyCode::Enter => {
-                    let key = input.text().trim().to_string();
-                    if key.is_empty() {
+            Modal::ApiKey {
+                provider,
+                input,
+                status,
+                checking,
+            } => {
+                if key.code == KeyCode::Esc {
+                    return;
+                }
+                if *checking {
+                    self.modal = Some(modal);
+                    return;
+                }
+                match key.code {
+                    KeyCode::Enter => {
+                        let api_key = input.text().trim().to_string();
+                        if api_key.is_empty() {
+                            *status = "enter an API key first".to_string();
+                            self.modal = Some(modal);
+                            return;
+                        }
+                        *checking = true;
+                        *status = "checking the key with the provider…".to_string();
+                        let provider = provider.clone();
+                        let name = provider.name.clone();
+                        let provider_config = provider.config.clone();
+                        let model = provider.model.clone();
+                        let key_for_task = api_key.clone();
+                        let tx = self.login_tx.clone();
+                        tokio::spawn(async move {
+                            let result = match Provider::new(
+                                name.clone(),
+                                provider_config,
+                                model,
+                                ProviderAuth {
+                                    key: key_for_task.clone(),
+                                    account_id: None,
+                                },
+                            ) {
+                                Ok(provider) => provider
+                                    .list_models()
+                                    .await
+                                    .map(|models| models.len())
+                                    .map_err(|error| format!("{error:#}")),
+                                Err(error) => Err(format!("{error:#}")),
+                            };
+                            match result {
+                                Ok(models) => {
+                                    let _ = tx.send(LoginEvent::KeyVerified {
+                                        provider: name,
+                                        key: key_for_task,
+                                        models,
+                                    });
+                                }
+                                Err(error) => {
+                                    let _ = tx.send(LoginEvent::KeyRejected {
+                                        provider: name,
+                                        error,
+                                    });
+                                }
+                            }
+                        });
                         self.modal = Some(modal);
-                        return;
                     }
-                    let provider = provider.clone();
-                    if let Err(error) = config::store_api_key(&provider.name, &key) {
-                        self.push_warn(format!("could not save the key: {error:#}"));
+                    KeyCode::Char(ch) => {
+                        input.insert_char(ch);
+                        *status = String::new();
+                        self.modal = Some(modal);
                     }
-                    self.complete_connect(
-                        provider,
-                        ProviderAuth {
-                            key,
-                            account_id: None,
-                        },
-                    );
+                    KeyCode::Backspace => {
+                        input.backspace();
+                        *status = String::new();
+                        self.modal = Some(modal);
+                    }
+                    _ => self.modal = Some(modal),
                 }
-                KeyCode::Char(ch) => {
-                    input.insert_char(ch);
-                    self.modal = Some(modal);
-                }
-                KeyCode::Backspace => {
-                    input.backspace();
-                    self.modal = Some(modal);
-                }
-                _ => self.modal = Some(modal),
-            },
+            }
             Modal::Login { url, .. } => {
                 if key.code == KeyCode::Esc {
                     if let Some(task) = self.login_task.take() {
@@ -1335,18 +1456,27 @@ impl App {
     pub fn handle_login_event(&mut self, event: LoginEvent) {
         match event {
             LoginEvent::Code { url, code } => {
+                let mut open = None;
                 if let Some(Modal::Login {
                     url: current_url,
                     code: current_code,
                     status,
+                    browser_opened,
                     ..
                 }) = &mut self.modal
                 {
-                    *current_url = Some(url);
+                    *current_url = Some(url.clone());
                     if !code.is_empty() {
                         *current_code = Some(code);
                     }
                     *status = "waiting for approval in the browser…".to_string();
+                    if !*browser_opened && std::env::var_os("D3_NO_BROWSER").is_none() {
+                        *browser_opened = true;
+                        open = Some(url);
+                    }
+                }
+                if let Some(url) = open {
+                    open_browser(&url);
                 }
             }
             LoginEvent::Success => {
@@ -1362,6 +1492,50 @@ impl App {
                     *failed = true;
                 }
             }
+            LoginEvent::KeyVerified {
+                provider,
+                key,
+                models,
+            } => {
+                let matches = matches!(
+                    &self.modal,
+                    Some(Modal::ApiKey { provider: current, .. }) if current.name == provider
+                );
+                if !matches {
+                    return;
+                }
+                if let Err(error) = config::store_api_key(&provider, &key) {
+                    self.push_warn(format!("could not save the key: {error:#}"));
+                    return;
+                }
+                if let Some(Modal::ApiKey { provider, .. }) = self.modal.take() {
+                    self.push_info(format!("key accepted; {models} models are available"));
+                    self.complete_connect(
+                        provider,
+                        ProviderAuth {
+                            key,
+                            account_id: None,
+                        },
+                    );
+                }
+            }
+            LoginEvent::KeyRejected { provider, error } => {
+                if let Some(Modal::ApiKey {
+                    provider: current,
+                    status,
+                    checking,
+                    ..
+                }) = &mut self.modal
+                    && current.name == provider
+                {
+                    *checking = false;
+                    *status = if error.contains("401") || error.contains("403") {
+                        "the provider rejected this key; check it and try again".to_string()
+                    } else {
+                        format!("could not verify the key: {error}")
+                    };
+                }
+            }
         }
         self.dirty = true;
     }
@@ -1371,7 +1545,7 @@ impl App {
         if text.is_empty() && self.attachments.is_empty() {
             return;
         }
-        if !self.connected && !text.starts_with('/') {
+        if !self.connected && !text.starts_with('/') && !text.starts_with('!') {
             self.push_warn("choose a provider and sign in first");
             self.open_provider_palette();
             return;
@@ -1388,6 +1562,24 @@ impl App {
             self.run_command(&text);
             return;
         }
+        if let Some(command) = text.strip_prefix('!') {
+            let include = !command.starts_with('!');
+            let command = command.trim_start_matches('!').trim().to_string();
+            if command.is_empty() {
+                self.push_warn("usage: !<shell command> or !!<command> to hide its output");
+                return;
+            }
+            self.items.push(Item::User(text.clone()));
+            self.busy = true;
+            self.status = "running command".to_string();
+            self.auto_scroll = true;
+            self.attachments.clear();
+            let _ = self
+                .commands
+                .send(WorkerCommand::Shell { command, include });
+            return;
+        }
+        let text = self.expand_mentions(&text);
         self.items.push(Item::User(text.clone()));
         self.messages += 1;
         self.busy = true;
@@ -1466,19 +1658,110 @@ impl App {
                 let _ = self.commands.send(WorkerCommand::ListModels);
             }
             "/provider" => self.open_provider_palette(),
-            "/tools" => self.push_info(format!(
-                "{} tools: read, write, edit, bash, glob, grep, ask_user, todo_write, skill",
-                self.info.tools
-            )),
+            "/tools" => {
+                let names = if self.info.tool_names.is_empty() {
+                    "no tools".to_string()
+                } else {
+                    self.info.tool_names.join(", ")
+                };
+                self.push_info(format!("{} tools: {names}", self.info.tools));
+            }
             "/skills" => {
                 self.set_input_text("$");
                 self.open_skill_palette();
             },
-            "/mcp" => self.push_info(format!("{} MCP servers connected.", self.info.mcp)),
-            "/context" => self.push_info(format!(
-                "{} messages · {} input / {} output tokens",
-                self.messages, self.input_tokens, self.output_tokens
+            "/mcp" => {
+                if self.info.mcp_servers.is_empty() {
+                    self.push_info(format!("{} MCP servers connected.", self.info.mcp));
+                } else {
+                    self.push_info(format!(
+                        "{} MCP servers: {}",
+                        self.info.mcp,
+                        self.info.mcp_servers.join(", ")
+                    ));
+                }
+            }
+            "/context" | "/cost" => self.push_info(format!(
+                "{} messages · {} input / {} output tokens · {} todos · {} chars of transcript{}",
+                self.messages,
+                self.input_tokens,
+                self.output_tokens,
+                self.todos.len(),
+                self.items.len(),
+                if command == "/cost" {
+                    " · pricing is not tracked; run /context for counts"
+                } else {
+                    ""
+                }
             )),
+            "/status" => self.push_info(format!(
+                "provider {} · model {} · branch {} · approval {} · connected {} · {} messages · {} in / {} out tokens",
+                self.info.provider,
+                self.model,
+                self.info.branch.as_deref().unwrap_or("none"),
+                if self.info.auto_approve { "auto" } else { "ask" },
+                if self.connected { "yes" } else { "no" },
+                self.messages,
+                self.input_tokens,
+                self.output_tokens
+            )),
+            "/compact" => {
+                if self.busy {
+                    self.push_warn("wait for the current turn to finish first");
+                    return;
+                }
+                if self.messages == 0 {
+                    self.push_warn("there is no conversation to compact");
+                    return;
+                }
+                self.busy = true;
+                self.status = "compacting".to_string();
+                let focus = (!argument.is_empty()).then(|| argument.to_string());
+                let _ = self.commands.send(WorkerCommand::Compact(focus));
+            }
+            "/diff" => {
+                if self.busy {
+                    self.push_warn("wait for the current turn to finish first");
+                    return;
+                }
+                self.busy = true;
+                self.status = "reading diff".to_string();
+                let _ = self.commands.send(WorkerCommand::Diff);
+            }
+            "/export" => {
+                if self.busy {
+                    self.push_warn("wait for the current turn to finish first");
+                    return;
+                }
+                self.busy = true;
+                self.status = "exporting".to_string();
+                let path = (!argument.is_empty()).then(|| argument.to_string());
+                let _ = self.commands.send(WorkerCommand::Export(path));
+            }
+            "/copy" => self.copy_last_answer(),
+            "/init" => {
+                let path = self.info.workspace.join("AGENTS.md");
+                if path.exists() {
+                    self.push_warn(format!("{} already exists", path.display()));
+                } else {
+                    match std::fs::write(&path, crate::prompt::AGENTS_TEMPLATE) {
+                        Ok(()) => self.push_info(
+                            "wrote AGENTS.md; edit it with the project's real commands",
+                        ),
+                        Err(error) => {
+                            self.push_warn(format!("could not write AGENTS.md: {error}"))
+                        }
+                    }
+                }
+            }
+            "/permissions" | "/permission" => self.handle_permissions_command(argument),
+            "/version" => self.push_info(format!(
+                "d3 {} · {} {}",
+                env!("CARGO_PKG_VERSION"),
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            )),
+            "/hotkeys" => self.push_info(help_text()),
             "/approve" | "/auto" => {
                 let value = match argument {
                     "on" | "yes" | "true" => true,
@@ -1496,33 +1779,125 @@ impl App {
             "/system" => self.push_info(
                 "restart with --system-file <path> or --system-prompt <text> to change the core prompt",
             ),
-            "/login" => {
+            "/login" | "/auth" => {
                 if self.busy {
                     self.push_warn("wait for the current turn to finish first");
                     return;
                 }
-                let Some(choice) = self
+                if argument.is_empty() {
+                    self.open_login_palette();
+                } else {
+                    self.begin_login(argument);
+                }
+            }
+            "/logout" => {
+                if self.busy {
+                    self.push_warn("wait for the current turn to finish first");
+                    return;
+                }
+                let name = if argument.is_empty() {
+                    self.info.provider.clone()
+                } else {
+                    argument.to_string()
+                };
+                if self
                     .providers
                     .iter()
-                    .find(|provider| provider.name == self.info.provider)
-                    .cloned()
-                else {
-                    self.push_warn("no provider selected");
-                    return;
-                };
-                if choice.config.kind == Some(ProviderKind::ChatGpt) {
-                    self.start_login(choice);
-                } else {
-                    self.modal = Some(Modal::ApiKey {
-                        provider: choice,
-                        input: InputBuffer::new(),
-                    });
-                    self.status = "sign in".to_string();
+                    .find(|provider| provider.name == name)
+                    .and_then(|provider| provider.config.kind)
+                    == Some(ProviderKind::ChatGpt)
+                {
+                    self.push_info(
+                        "ChatGPT credentials are managed by Codex CLI; run `codex logout` to remove them",
+                    );
+                }
+                match config::logout(&name) {
+                    Ok(true) => {
+                        self.push_info(format!("removed the stored credential for {name}"));
+                        if name == self.info.provider {
+                            self.connected = false;
+                            self.status = "choose provider".to_string();
+                            self.open_provider_palette();
+                        }
+                    }
+                    Ok(false) => self.push_info(format!(
+                        "no stored credential for {name}; environment and harness.json values are unchanged"
+                    )),
+                    Err(error) => self.push_warn(format!("could not remove the credential: {error:#}")),
                 }
             }
             "/exit" | "/quit" => self.should_quit = true,
             other => self.push_warn(format!("unknown command {other}; try /help")),
         }
+    }
+
+    fn expand_mentions(&mut self, text: &str) -> String {
+        use std::sync::OnceLock;
+        static MENTION: OnceLock<regex::Regex> = OnceLock::new();
+        let regex = MENTION
+            .get_or_init(|| regex::Regex::new(r"(?:^|\s)@([^\s]+)").expect("file mention regex"));
+        let mentions = regex
+            .captures_iter(text)
+            .filter_map(|capture| capture.get(1).map(|found| found.as_str().to_string()))
+            .collect::<Vec<_>>();
+        if mentions.is_empty() {
+            return text.to_string();
+        }
+        let mut context = String::new();
+        let mut attached = Vec::new();
+        for raw in mentions {
+            let raw = raw.trim_matches(['"', '\'', ',', ';', ')', ']']);
+            let path = self.info.workspace.join(raw);
+            let Ok(path) = path.canonicalize() else {
+                self.push_warn(format!("@ mention not found: {raw}"));
+                continue;
+            };
+            if !path.starts_with(&self.info.workspace) {
+                self.push_warn(format!("@ mention is outside the workspace: {raw}"));
+                continue;
+            }
+            if !path.is_file() {
+                self.push_warn(format!("@ mention is not a file: {raw}"));
+                continue;
+            }
+            let extension = path
+                .extension()
+                .map(|extension| extension.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+            if matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp") {
+                self.attach_image(&path);
+                attached.push(raw.to_string());
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else {
+                self.push_warn(format!("could not read @ mention: {raw}"));
+                continue;
+            };
+            if bytes.contains(&0) {
+                self.push_warn(format!("@ mention is a binary file: {raw}"));
+                continue;
+            }
+            let file = String::from_utf8_lossy(&bytes);
+            let file = if file.chars().count() > 50_000 {
+                format!(
+                    "{}… [file truncated at 50,000 characters]",
+                    file.chars().take(50_000).collect::<String>()
+                )
+            } else {
+                file.into_owned()
+            };
+            context.push_str(&format!(
+                "\n\nAttached file `{}`:\n```\n{}\n```",
+                raw,
+                file.trim_end()
+            ));
+            attached.push(raw.to_string());
+        }
+        if attached.is_empty() {
+            return text.to_string();
+        }
+        self.push_info(format!("attached: {}", attached.join(", ")));
+        format!("{text}{context}")
     }
 
     fn paste_chat(&mut self, text: &str) {
@@ -1658,8 +2033,110 @@ impl App {
             self.modal = Some(Modal::ApiKey {
                 provider: choice,
                 input: InputBuffer::new(),
+                status: String::new(),
+                checking: false,
             });
             self.status = "sign in".to_string();
+        }
+    }
+
+    fn open_login_palette(&mut self) {
+        self.palette = Some(Palette {
+            kind: PaletteKind::LoginProviders,
+            items: self
+                .providers
+                .iter()
+                .map(|provider| PaletteItem {
+                    label: provider.name.clone(),
+                    description: format!(
+                        "{} · {}",
+                        provider.model,
+                        if provider_key(provider).is_some()
+                            || provider.config.kind == Some(ProviderKind::ChatGpt)
+                        {
+                            "signed in"
+                        } else {
+                            "sign in"
+                        }
+                    ),
+                    value: provider.name.clone(),
+                })
+                .collect(),
+            selected: self
+                .providers
+                .iter()
+                .position(|provider| provider.name == self.info.provider)
+                .unwrap_or(0),
+        });
+        self.status = "sign in".to_string();
+    }
+
+    fn begin_login(&mut self, name: &str) {
+        let Some(choice) = self
+            .providers
+            .iter()
+            .find(|provider| provider.name == name)
+            .cloned()
+        else {
+            self.push_warn(format!("unknown provider {name}"));
+            return;
+        };
+        if choice.config.kind == Some(ProviderKind::ChatGpt) {
+            self.start_login(choice);
+        } else {
+            self.modal = Some(Modal::ApiKey {
+                provider: choice,
+                input: InputBuffer::new(),
+                status: String::new(),
+                checking: false,
+            });
+            self.status = "sign in".to_string();
+        }
+    }
+
+    fn handle_permissions_command(&mut self, argument: &str) {
+        let mut parts = argument.split_whitespace();
+        let Some(target) = parts.next() else {
+            self.push_info(format!(
+                "permissions: shell={:?} edit={:?} · use /permissions shell|edit ask|allow|deny",
+                self.info.shell_permission, self.info.edit_permission
+            ));
+            return;
+        };
+        let Some(value) = parts.next() else {
+            self.push_warn("usage: /permissions shell|edit ask|allow|deny");
+            return;
+        };
+        let value = match value {
+            "ask" => crate::config::Permission::Ask,
+            "allow" | "yes" | "on" => crate::config::Permission::Allow,
+            "deny" | "no" | "off" => crate::config::Permission::Deny,
+            _ => {
+                self.push_warn("permission must be ask, allow, or deny");
+                return;
+            }
+        };
+        if !matches!(target, "shell" | "edit") {
+            self.push_warn("permission target must be shell or edit");
+            return;
+        }
+        let _ = self.commands.send(WorkerCommand::SetPermission {
+            target: target.to_string(),
+            value,
+        });
+    }
+
+    fn copy_last_answer(&mut self) {
+        let Some(text) = self.items.iter().rev().find_map(|item| match item {
+            Item::Assistant { text, .. } if !text.trim().is_empty() => Some(text.clone()),
+            _ => None,
+        }) else {
+            self.push_warn("there is no assistant answer to copy");
+            return;
+        };
+        match crate::image::copy_text(&text) {
+            Ok(()) => self.push_info("copied the last answer to the clipboard"),
+            Err(error) => self.push_warn(format!("could not copy to the clipboard: {error:#}")),
         }
     }
 
@@ -1701,6 +2178,7 @@ impl App {
             code: None,
             status: "starting device sign-in…".to_string(),
             failed: false,
+            browser_opened: false,
         });
         self.status = "sign in".to_string();
         let tx = self.login_tx.clone();
@@ -2049,6 +2527,86 @@ impl App {
                     self.push_warn(error);
                 }
             },
+            WorkerEvent::Compacted(result) => {
+                self.busy = false;
+                self.status = "ready".to_string();
+                match result {
+                    Ok(info) => {
+                        self.messages = info.after_messages;
+                        self.input_tokens += info.input_tokens;
+                        self.output_tokens += info.output_tokens;
+                        self.push_info(format!(
+                            "compacted {} messages into {}; summary preview: {}",
+                            info.before_messages,
+                            info.after_messages,
+                            truncate(info.summary.lines().next().unwrap_or(""), 120)
+                        ));
+                    }
+                    Err(error) => self.push_warn(error),
+                }
+            }
+            WorkerEvent::ShellOutput {
+                command,
+                output,
+                included,
+            } => {
+                self.busy = false;
+                self.status = "ready".to_string();
+                self.items.push(Item::Tool {
+                    expanded: true,
+                    output: output.clone(),
+                    id: format!("shell-{}", self.items.len()),
+                    name: "shell".to_string(),
+                    detail: format!("!{command}"),
+                    summary: output.lines().next().unwrap_or("(no output)").to_string(),
+                    state: ToolState::Done,
+                });
+                self.push_info(if included {
+                    "command output added to the conversation context"
+                } else {
+                    "command output shown here only (use ! to include it next time)"
+                });
+            }
+            WorkerEvent::PermissionChanged {
+                target,
+                value,
+                result,
+            } => {
+                match result {
+                    Ok(()) => {
+                        match target.as_str() {
+                            "shell" => self.info.shell_permission = value,
+                            "edit" => self.info.edit_permission = value,
+                            _ => {}
+                        }
+                        self.push_info(format!("permission {target}: {value:?}"));
+                    }
+                    Err(error) => self.push_warn(error),
+                }
+                self.busy = false;
+                self.status = "ready".to_string();
+            }
+            WorkerEvent::Exported(result) => {
+                self.busy = false;
+                self.status = "ready".to_string();
+                match result {
+                    Ok(path) => {
+                        self.push_info(format!("exported conversation to {}", path.display()))
+                    }
+                    Err(error) => self.push_warn(error),
+                }
+            }
+            WorkerEvent::Diff(result) => {
+                self.busy = false;
+                self.status = "ready".to_string();
+                match result {
+                    Ok(output) if output.trim() == "exit code: 0" || output.trim().is_empty() => {
+                        self.push_info("no working-tree changes")
+                    }
+                    Ok(output) => self.items.push(Item::Info(output)),
+                    Err(error) => self.push_warn(error),
+                }
+            }
         }
         self.dirty = true;
     }
@@ -2242,31 +2800,49 @@ fn help_text() -> String {
         "Commands",
         "/help              show this help",
         "/new               start a fresh conversation",
-        "/paste-image       attach clipboard image (Ctrl+V)",
-        "/detach            remove pending images",
+        "/resume [id]       choose a project conversation",
+        "/continue          resume the latest project conversation",
+        "/compact [focus]   summarize history to free context",
+        "/status            provider, model, branch, and context",
+        "/context           message and token usage",
+        "/cost              token usage for this session",
+        "/diff              show Git status and the working diff",
+        "/export [path]     save this conversation as Markdown",
+        "/copy              copy the last answer to the clipboard",
         "/model [id]        show or change the model",
         "/models            fetch and choose from the provider catalog",
-        "/provider          show the current provider",
+        "/provider          choose and switch provider",
+        "/login [provider]  sign in or rotate credentials",
+        "/logout [provider] remove a stored credential",
+        "/approve [on|off]  toggle auto-approval",
+        "/permissions       view or change shell/edit permissions",
         "/tools             list available tools",
         "/skills            list available skills",
         "/mcp               list connected MCP servers",
-        "/context           show messages and token usage",
-        "/approve [on|off]  toggle auto-approval",
+        "/init              create a starter AGENTS.md",
+        "/ui                show customization settings",
         "/system            how to change the system prompt",
-        "/login             how to change API credentials",
+        "/version           show the harness version",
+        "/paste-image       attach clipboard image (Ctrl+V)",
+        "/detach            remove pending images",
         "/exit              leave harness",
+        "",
+        "Prompt shortcuts",
+        "!command           run a shell command and add its output to context",
+        "!!command          run a shell command without adding output to context",
+        "@path              attach a file to your next prompt",
+        "$skill             choose a skill",
         "",
         "Keys",
         "Enter              send",
-        "Ctrl+Enter / Shift+Enter / Alt+Enter / Ctrl+J  newline (terminal support varies)",
+        "Ctrl+Enter / Shift+Enter / Alt+Enter / Ctrl+J  newline",
         "/                  command palette",
-        "/resume [id]       choose a project conversation",
-        "/continue          resume the latest project conversation",
-        "/ui                show customization settings",
+        "Tab                complete/open the command palette",
         "Click tool row     expand or collapse output",
         "PageUp/PageDown    scroll the conversation",
         "Esc twice          stop the current turn without quitting",
         "Ctrl+C twice       quit while a turn is running",
+        "Ctrl+D             quit when the input is empty",
     ]
     .join("\n")
 }
@@ -2286,10 +2862,14 @@ mod tests {
             workspace: PathBuf::from("/tmp/test-workspace"),
             branch: Some("main".to_string()),
             skills: vec!["review".to_string(), "teach".to_string()],
+            tool_names: vec!["read".into(), "write".into()],
             mcp: 0,
+            mcp_servers: Vec::new(),
             tools: 9,
             auto_approve: false,
             connected: true,
+            shell_permission: config::Permission::Ask,
+            edit_permission: config::Permission::Allow,
             providers: Vec::new(),
             ui: config::UiConfig::default(),
         };
@@ -2613,8 +3193,8 @@ mod tests {
         let (mut app, _rx) = app();
         key(&mut app, KeyCode::Char('/'));
         let screen = text(&mut app);
-        assert!(screen.contains("fetch and choose"), "{screen}");
-        assert!(screen.contains("/models"), "{screen}");
+        assert!(screen.contains("show commands and shortcuts"), "{screen}");
+        assert!(screen.contains("/help"), "{screen}");
         key(&mut app, KeyCode::Char('m'));
         key(&mut app, KeyCode::Char('o'));
         let screen = text(&mut app);
@@ -2622,7 +3202,7 @@ mod tests {
         assert!(!screen.contains("/help"), "{screen}");
         key(&mut app, KeyCode::Esc);
         let screen = text(&mut app);
-        assert!(!screen.contains("fetch and choose"), "{screen}");
+        assert!(!screen.contains("show commands and shortcuts"), "{screen}");
     }
 
     #[test]
@@ -2730,10 +3310,14 @@ mod tests {
             workspace: PathBuf::from("/tmp/test-workspace"),
             branch: None,
             skills: Vec::new(),
+            tool_names: Vec::new(),
             mcp: 0,
+            mcp_servers: Vec::new(),
             tools: 9,
             auto_approve: false,
             connected: false,
+            shell_permission: config::Permission::Ask,
+            edit_permission: config::Permission::Allow,
             ui: config::UiConfig::default(),
             providers: vec![choice],
         };
@@ -2746,6 +3330,111 @@ mod tests {
             rx.try_recv().unwrap(),
             WorkerCommand::SetProvider(_, _)
         ));
+    }
+
+    #[test]
+    fn bang_runs_a_shell_command_and_renders_its_output() {
+        let (mut app, mut rx) = app();
+        app.set_input_text("!echo hello");
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            WorkerCommand::Shell { command, include: true } if command == "echo hello"
+        ));
+        app.handle_worker_event(WorkerEvent::ShellOutput {
+            command: "echo hello".into(),
+            output: "hello\nexit code: 0".into(),
+            included: true,
+        });
+        assert!(!app.busy);
+        assert!(text(&mut app).contains("hello"));
+        assert!(text(&mut app).contains("added to the conversation context"));
+    }
+
+    #[test]
+    fn file_mentions_attach_text_and_reject_escapes() {
+        let (mut app, _rx) = app();
+        let dir = tempfile::tempdir().unwrap();
+        app.info.workspace = dir.path().to_path_buf();
+        std::fs::write(dir.path().join("note.txt"), "needle from mention\n").unwrap();
+        let expanded = app.expand_mentions("explain @note.txt please");
+        assert!(expanded.contains("Attached file `note.txt`"));
+        assert!(expanded.contains("needle from mention"));
+        let escaped = app.expand_mentions("read @../outside.txt");
+        assert!(!escaped.contains("Attached file"));
+    }
+
+    #[test]
+    fn compact_and_permission_commands_go_through_the_worker() {
+        let (mut app, mut rx) = app();
+        app.messages = 3;
+        app.run_command("/compact keep the failing test");
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            WorkerCommand::Compact(Some(focus)) if focus == "keep the failing test"
+        ));
+        app.handle_worker_event(WorkerEvent::Compacted(Ok(crate::agent::CompactInfo {
+            before_messages: 3,
+            after_messages: 2,
+            input_tokens: 10,
+            output_tokens: 4,
+            summary: "- kept the failing test".into(),
+        })));
+        assert!(!app.busy);
+        assert_eq!(app.messages, 2);
+        app.run_command("/permissions shell deny");
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            WorkerCommand::SetPermission { target, value }
+                if target == "shell" && value == config::Permission::Deny
+        ));
+        app.handle_worker_event(WorkerEvent::PermissionChanged {
+            target: "shell".into(),
+            value: config::Permission::Deny,
+            result: Ok(()),
+        });
+        assert_eq!(app.info.shell_permission, config::Permission::Deny);
+    }
+
+    #[test]
+    fn login_palette_offers_every_provider_and_opens_key_modal() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (login_tx, _login_rx) = mpsc::unbounded_channel();
+        let choice = ProviderChoice {
+            name: "alt".to_string(),
+            model: "alt-model".to_string(),
+            config: ProviderConfig {
+                base_url: Some("http://127.0.0.1:1/v1".to_string()),
+                kind: Some(ProviderKind::OpenAi),
+                ..Default::default()
+            },
+        };
+        let info = TuiInfo {
+            provider: "test".to_string(),
+            model: "test-model".to_string(),
+            workspace: PathBuf::from("/tmp/test-workspace"),
+            branch: None,
+            skills: Vec::new(),
+            tool_names: Vec::new(),
+            mcp: 0,
+            mcp_servers: Vec::new(),
+            tools: 0,
+            auto_approve: false,
+            connected: true,
+            shell_permission: config::Permission::Ask,
+            edit_permission: config::Permission::Allow,
+            providers: vec![choice],
+            ui: config::UiConfig::default(),
+        };
+        let mut app = App::new(info, tx, login_tx);
+        app.run_command("/login");
+        assert_eq!(
+            app.palette.as_ref().map(|palette| palette.kind),
+            Some(PaletteKind::LoginProviders)
+        );
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(app.modal, Some(Modal::ApiKey { .. })));
+        assert!(text(&mut app).contains("verified before it is saved"));
     }
 
     #[test]

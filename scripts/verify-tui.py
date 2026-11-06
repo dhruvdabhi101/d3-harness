@@ -107,6 +107,7 @@ with tempfile.TemporaryDirectory(prefix="d3-tui-") as temporary:
         tmux("send-keys", "-t", "verify", "-l", "/resume")
         tmux("send-keys", "-t", "verify", "Enter")
         wait_for("project conversations")
+        time.sleep(0.3)
         tmux("send-keys", "-t", "verify", "Enter")
         restored = wait_for("Resumed project conversation")
         assert "Found the saved needle." in restored, restored
