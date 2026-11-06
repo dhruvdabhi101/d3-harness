@@ -54,7 +54,9 @@ but they are not primarily coding-harness benchmarks.
 ## Suggested integration order
 
 1. Keep `d3 bench` for smoke/read/write/edit regressions.
-2. Add a Harbor adapter so `d3` can be run as a Terminal-Bench agent.
+2. Add a Harbor adapter so `d3` can be run as a Terminal-Bench agent. The adapter
+   lives in [`integrations/harbor/`](../integrations/harbor/) and exposes
+   `integrations.harbor.d3_agent:D3Agent`.
 3. Add a small SWE-bench Verified runner or adapter for the standard number.
 4. Add Aider Polyglot only if edit-format quality becomes a focus.
 

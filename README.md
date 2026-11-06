@@ -783,6 +783,28 @@ edit       PASS        4977ms  33769/197    I'll read the file first, then make 
 4/4 passed · 12.4s · 75514 input / 338 output tokens
 ```
 
+### Terminal-Bench
+
+Terminal-Bench latest currently resolves to 66 tasks (task version `2.0.8`).
+The repository includes a Harbor adapter for running d3 as a Terminal-Bench
+agent:
+
+```bash
+cargo build --release
+PYTHONPATH=. harbor run \
+  -d terminal-bench/terminal-bench@latest \
+  --agent integrations.harbor.d3_agent:D3Agent \
+  --ak binary_path="$PWD/target/release/d3" \
+  -m deepseek-v4.1-flash \
+  --ae OPENCODE_GO_API_KEY="$OPENCODE_GO_API_KEY" \
+  --allow-agent-host opencode.ai \
+  --env docker
+```
+
+See [`integrations/harbor/README.md`](integrations/harbor/README.md) for
+prerequisites and the `-l 1` smoke-test command. A real run requires Docker or
+a configured Harbor cloud environment.
+
 ## Verification
 
 ```bash
