@@ -38,6 +38,20 @@ but they are not primarily coding-harness benchmarks.
 | **OpenAI Evals** | Open-source framework for defining and running model evals. |
 | **Aider benchmark scripts** | The runner behind the Aider leaderboards, focused on edit formats and test pass rates. |
 
+## Terminal-Bench runs
+
+Terminal-Bench `latest` resolved to 66 tasks at task version `2.0.8` on
+2026-11-06.
+
+| Agent | Model | Task | Reward | Notes |
+| --- | --- | --- | --- | --- |
+| Harbor oracle | — | sample | 1.0 | Validates the dataset, Docker backend, and workflow |
+| d3 | `deepseek-v4.1-flash` | `vllm-deepseek-streaming` | 0.0 | 360k input / 30k output tokens; task not solved |
+| d3 | `gpt-6-luna` | `html-js-filter` | 0.0 | 626k input / 34k output tokens; preserved 12 clean files but missed some XSS vectors |
+
+These are single-task smoke runs, not a full leaderboard submission. They show
+the adapter and the real terminal environment working end to end.
+
 ## What fits d3
 
 - `d3 bench` is the fast, dependency-free regression check. It runs the real

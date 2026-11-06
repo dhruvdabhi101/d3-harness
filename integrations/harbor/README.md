@@ -7,13 +7,19 @@ framework behind Terminal-Bench.
 
 - Docker (or another Harbor environment backend with credentials)
 - `uv`
-- A locally built `target/release/d3`
+- A statically linked `d3` binary for the task container
 - A model credential, for example `OPENCODE_GO_API_KEY`
 
 ```bash
 uv tool install harbor
-cargo build --release
+rustup target add x86_64-unknown-linux-musl
+sudo apt-get install -y musl-tools
+cargo build --release --target x86_64-unknown-linux-musl
 ```
+
+A glibc build can fail inside older task images (`GLIBC_2.39 not found`).
+The GitHub Actions workflow in `.github/workflows/terminal-bench.yml` builds the
+musl binary automatically.
 
 ## Run
 
@@ -22,7 +28,7 @@ export OPENCODE_GO_API_KEY="..."
 PYTHONPATH=. harbor run \
   -d terminal-bench/terminal-bench@latest \
   --agent integrations.harbor.d3_agent:D3Agent \
-  --ak binary_path="$PWD/target/release/d3" \
+  --ak binary_path="$PWD/target/x86_64-unknown-linux-musl/release/d3" \
   -m deepseek-v4.1-flash \
   --ae OPENCODE_GO_API_KEY="$OPENCODE_GO_API_KEY" \
   --allow-agent-host opencode.ai \
@@ -30,9 +36,12 @@ PYTHONPATH=. harbor run \
   --n-concurrent 1
 ```
 
-Use `-l 1` first to smoke-test the adapter. The adapter:
+Use `-l 1` first to smoke-test the adapter. To select one task, pass its fully
+qualified name, for example `-i terminal-bench/html-js-filter`.
 
-1. uploads `target/release/d3` into the task container;
+The adapter:
+
+1. uploads the statically linked `d3` binary into the task container;
 2. installs it at `/usr/local/bin/d3`;
 3. runs one non-interactive, auto-approved turn in the task workdir;
 4. writes the transcript to the trial's `agent/d3.txt`;
@@ -44,7 +53,7 @@ Harbor's own agent preflight can be checked without Docker:
 PYTHONPATH=. harbor run \
   -d terminal-bench/terminal-bench@latest \
   --agent integrations.harbor.d3_agent:D3Agent \
-  --ak binary_path="$PWD/target/release/d3" \
+  --ak binary_path="$PWD/target/x86_64-unknown-linux-musl/release/d3" \
   -m deepseek-v4.1-flash \
   --dry-run --yes
 ```
