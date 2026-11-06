@@ -74,7 +74,11 @@ class D3Agent(BaseAgent):
         )
         result = await environment.exec("d3 --version", timeout_sec=30)
         if result.return_code != 0:
-            raise RuntimeError(f"d3 is not runnable in the task: {result.stderr}")
+            raise RuntimeError(
+                "d3 is not runnable in the task "
+                f"(exit {result.return_code}): "
+                f"stdout={result.stdout!r} stderr={result.stderr!r}"
+            )
         self._version = (result.stdout or "").strip() or None
 
     @override
